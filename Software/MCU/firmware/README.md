@@ -6,4 +6,5 @@ The firmware is tailored to meet the requirements for the EXCISS mission.
 
 Some library's are fork of existing library's. Mainly the i2c and onewire library's are heavily modified to prevent any blocking caused by faulty components.
 
-The battery management library requires some additional work to be able to use for other applications.
+The battery management library is a bare minimum implementation.
+
