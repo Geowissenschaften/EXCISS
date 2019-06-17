@@ -1,0 +1,918 @@
+#!/bin/bash
+###############################################################################
+#
+# SCU_launch_mission
+#
+# Performs the science experiment and processes data and logs.
+#   1. Increments SCU cycle counter (SCU_cycle)
+#   2. Executes science experiment profile (SCU_experiment_main)
+#   3. Processes experiment data and logs (SCU_process_data)
+#   4. Creates system and experiment report (SCU_status_report)
+#
+# Typically started by SCU_boot, after date is set and updates are applied.
+#
+# Needs sudo (root) for mkdir, chown, chmod, rsync - see ${CMD_PREFIX_SUDO}
+#
+# $LOCATION ${SCU_HOME}/bin
+#
+# $REQUIRES VARIABLE SCU_USER_GID
+# $REQUIRES VARIABLE SCU_USER_UID
+# $REQUIRES VARIABLE SCU_SCIENCE_START_DATE
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_MCU_message
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_SCU_base
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_SCU_devices
+# $REQUIRES FILE ${SCU_HOME}/bin/SCU_cycle
+# $REQUIRES FILE ${SCU_HOME}/bin/SCU_experiment_main
+# $REQUIRES FILE ${SCU_HOME}/bin/SCU_process_data
+# $REQUIRES FILE ${SCU_HOME}/bin/SCU_status_report
+# $REQUIRES FILE ${SCU_HOME}/bin/USB_memory
+# $REQUIRES PACKAGE rsync
+#
+# $RETURNS 0 success
+# $RETURNS 1 general error
+# $RETURNS 2 invalid option or argument
+# $RETURNS 3 failed to load environment
+# $RETURNS 4 error performing requested task
+#
+# $COMPONENT_NAME MLU.SCU.SCU_launch_mission
+# $VERSION_NUMBER 0.6.1
+# $VERSION_DATE 2018-09-08_23:55:00
+#
+# $TODO Verify cycle is not 0 or already used, else recover cycle number
+#
+###############################################################################
+# set -x
+unalias -a
+
+#------------------------------------------------------------------------------
+# Define global environment variables
+#------------------------------------------------------------------------------
+
+MY_START_TIME="$(date +%Y-%m-%d_%H:%M:%S)" # current time early after start
+MY_DIR_NAME="$(dirname $0)" # directory where this script is located
+MY_FILE_NAME="$(basename $0)" # file name of this script (without path)
+MY_BASE_NAME="$(basename ${MY_FILE_NAME} .sh)" # script name without ".sh"
+MY_EXEC_USER="$(whoami 2>/dev/null)" # name of user who started this script
+MY_PROCESS_ID="$(ps -fp $$ -o pid= | awk '{print $1}')" # PID of this script
+MY_PARENT_ID="$(ps -fp $$ -o ppid= | awk '{print $1}')" # PID of parent process
+MY_ARG_COUNT="$#" # number of parameters passed to this script
+MY_ARG_LIST="$@" # list of all parameters passed to this script
+WORK_DIR_NAME="$(pwd)" # current work directory of shell starting this script
+
+typeset -i RETURN_CODE=0 # return code of previous command (0=success)
+typeset -i MY_EXIT_RC=0 # return code of this script (0=success)
+typeset -i OPT_EXCLUSIVE_COUNT=0 # counter for mutually exclusive options
+typeset -i OPT_REQUIRED_COUNT=0 # counter for required options
+
+F_LIB_MCU_MESSAGE_REL="lib/lib_MCU_message" # library lib_MCU_message
+F_LIB_SCU_BASE_REL="lib/lib_SCU_base" # library lib_SCU_base
+F_LIB_SCU_DEVICES_REL="lib/lib_SCU_devices" # library lib_SCU_devices
+F_BIN_SCU_CYCLE_REL="bin/SCU_cycle" # binary SCU_cycle
+F_BIN_SCU_EXPERIMENT_MAIN_REL="bin/SCU_experiment_main" # SCU_experiment_main
+F_BIN_SCU_PROCESS_DATA_REL="bin/SCU_process_data" # binary SCU_process_data
+F_BIN_SCU_STATUS_REPORT_REL="bin/SCU_status_report" # binary SCU_status_report
+F_BIN_USB_MEMORY_REL="bin/USB_memory" # binary USB_memory
+
+typeset -i CURRENT_CYCLE_NUMBER=0 # current SCU cycle number from cf
+typeset -i NEW_CYCLE_NUMBER=0 # new cycle number to be established
+
+F_SCU_LAUNCH_MISSION_LOG_REL="log/${MY_BASE_NAME}.log" # SCU_launch_mission log
+SCU_MISSION_KEEPALIVE_TIME="3600" # keepalive time for SCU_boot [s] (60m = 1h)
+MISSION_CLEAR_TO_GO=true # technical profiles can be started
+SCIENCE_CLEAR_TO_GO=true # science experiment can be carried out
+
+#------------------------------------------------------------------------------
+#
+# Function f_Print_Help
+#
+# Shows the usage of this script.
+# Usage: f_Print_Help
+# Returns: (none)
+#------------------------------------------------------------------------------
+
+function f_Print_Help {
+
+	echo "Usage: ${MY_FILE_NAME} [-v][-V][-h]"
+	echo "Performs the science experiment and processes data and logs."
+	echo "  1. Increments SCU cycle counter (SCU_cycle)"
+	echo "  2. Executes science experiment profile (SCU_experiment_main)"
+	echo "  3. Processes experiment data and logs (SCU_process_data)"
+	echo "  4. Creates system and experiment report (SCU_status_report)"
+	echo
+	echo "Started by SCU_boot, after date is set and updates are applied."
+	echo
+	echo "  -v     print verbose output"
+	echo "  -V     print version of this script"
+	echo "  -h     print this help message"
+	echo
+	echo "Example: ${MY_FILE_NAME}"
+
+}
+
+#------------------------------------------------------------------------------
+#
+# Function f_Load_SCU_Env
+#
+# Loads the SCU environment with global variables and functions.
+# Usage: f_Load_SCU_Env
+# Returns: 0 success
+# Returns: 1 variable $SCU_HOME is undefined
+# Returns: 2 directory $SCU_HOME is invalid
+# Returns: 3 failed to load SCU environment
+#------------------------------------------------------------------------------
+
+function f_Load_SCU_Env {
+
+	if [[ "${SCU_HOME}" == "" ]]; then
+
+		echo "ERROR: Variable SCU_HOME not defined in environment!" >&2
+		return 1
+
+	else
+
+		if [[ ! -e "${SCU_HOME}" ]]; then
+
+			if "${OPTION_LOWER_V}"; then
+				echo "ERROR: Directory SCU_HOME=${SCU_HOME} does not exist!" >&2
+			fi
+			return 2
+
+		elif [[ ! -e "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" ]]; then
+
+			if "${OPTION_LOWER_V}"; then
+				echo "ERROR: SCU_HOME=${SCU_HOME} is not a valid SCU" \
+					"installation!" >&2
+			fi
+			return 2
+
+		else
+
+			if "${OPTION_LOWER_V}"; then
+				echo "Calling library function:" \
+					"${SCU_HOME}/${F_LIB_SCU_BASE_REL} f_SCU_Load_Env" >&2
+			fi
+
+			export SCU_HOME # export current SCU_HOME for calls to libraries
+			unset SCU_ENV_VERSION_NUMBER SCU_ENV_VERSION_DATE # clear variables
+			. "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" f_SCU_Load_Env # source SCU_env
+
+			if [[ -n "${SCU_ENV_VERSION_NUMBER}" && \
+					-n "${SCU_ENV_VERSION_DATE}" ]]; then
+
+				if "${OPTION_LOWER_V}"; then
+					echo "Successfully loaded SCU environment version:" \
+						"${SCU_ENV_VERSION_NUMBER} (${SCU_ENV_VERSION_DATE})" >&2
+					echo "Using SCU_HOME=${SCU_HOME}" >&2
+					echo >&2
+				fi
+				return 0
+
+			else
+
+				if "${OPTION_LOWER_V}"; then
+					echo "ERROR: Failed to load SCU environment in" \
+						"SCU_HOME=${SCU_HOME}!" >&2
+				fi
+				return 3
+
+			fi
+
+		fi
+
+	fi
+
+}
+
+#------------------------------------------------------------------------------
+#
+# Function f_SCU_launch_mission_log_Header
+#
+# Prints the file header for new SCU_launch_mission.log files.
+# Usage: f_SCU_launch_mission_log_Header
+# Returns: (none)
+#------------------------------------------------------------------------------
+
+function f_SCU_launch_mission_log_Header {
+
+	MY_VERSION_NUMBER="$(awk '$1~/^#/ && $2~/^\$VERSION_NUMBER$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+	MY_VERSION_DATE="$(awk '$1~/^#/ && $2~/^\$VERSION_DATE$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+
+	if [[ "${MY_VERSION_NUMBER}" == "" ]]; then
+		MY_VERSION_NUMBER="0.0.0"
+	fi
+	if [[ "${MY_VERSION_DATE}" == "" ]]; then
+		MY_VERSION_DATE="1970-01-01_00:00:00"
+	fi
+
+	cat << 'EOF'
+###############################################################################
+#
+# SCU_launch_mission.log
+#
+# Logs executions of SCU_launch_mission runs.
+#
+# $LOCATION ${SCU_HOME}/log
+#
+# $REQUIRES {none}
+#
+# $RETURNS {none}
+#
+# $COMPONENT_NAME MLU.SCU.SCU_launch_mission.log
+EOF
+echo "# \$VERSION_NUMBER ${MY_VERSION_NUMBER}"
+echo "# \$VERSION_DATE ${MY_VERSION_DATE}"
+	cat << 'EOF'
+#
+###############################################################################
+EOF
+
+}
+
+#------------------------------------------------------------------------------
+#
+# Function f_Standard_file_Footer
+#
+# Prints the standard file footer for new files.
+# Usage: f_Standard_file_Footer
+# Returns: (none)
+#------------------------------------------------------------------------------
+
+function f_Standard_file_Footer {
+
+	cat << 'EOF'
+###############################################################################
+# EOF
+###############################################################################
+EOF
+
+}
+
+#------------------------------------------------------------------------------
+# Parse command line parameters
+#------------------------------------------------------------------------------
+
+GETOPTS_OPTSTRING=":vVh" # needs to start with ':' for quiet mode
+
+OPTION_LOWER_V=false
+OPTION_UPPER_V=false
+OPTION_LOWER_H=false
+
+#
+# Print help (-h|-?) and version (-V) on priority
+# (will not work if given as an argument to an option requiring arguments)
+#
+
+OPTIND=1 # start with 1st command line parameter
+while getopts "${GETOPTS_OPTSTRING}" CMD_OPTION; do
+	case "${CMD_OPTION}" in
+		"v")
+			OPTION_LOWER_V=true
+			;;
+		"V")
+			OPTION_UPPER_V=true
+			;;
+		"h")
+			OPTION_LOWER_H=true
+			;;
+		"?")
+			if [[ "${OPTARG}" == "?" ]]; then
+				OPTION_LOWER_H=true
+			fi
+			;;
+	esac
+done
+
+if "${OPTION_LOWER_H}"; then
+	f_Print_Help
+	exit 0
+fi
+
+if "${OPTION_UPPER_V}"; then
+	MY_VERSION_NUMBER="$(awk '$1~/^#/ && $2~/^\$VERSION_NUMBER$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+	MY_VERSION_DATE="$(awk '$1~/^#/ && $2~/^\$VERSION_DATE$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+	if [[ -n "${MY_VERSION_NUMBER}" && -n "${MY_VERSION_DATE}" ]]; then
+		echo "${MY_BASE_NAME} version ${MY_VERSION_NUMBER}" \
+			"(${MY_VERSION_DATE})"
+		exit 0
+	else
+		echo "ERROR: Can not find version information" \
+			"for ${MY_BASE_NAME}!" >&2
+		exit 1
+	fi
+fi
+
+#
+# Parse remaining command line options and arguments
+#
+
+OPTIND=1 # start with 1st command line parameter
+while getopts "${GETOPTS_OPTSTRING}" CMD_OPTION; do
+	case "${CMD_OPTION}" in
+		"?")
+			echo "ERROR: Invalid option -${OPTARG} specified!" >&2
+			echo >&2
+			f_Print_Help >&2
+			exit 2
+			;;
+		":")
+			echo "ERROR: Option -${OPTARG} requires an argument!" >&2
+			echo >&2
+			f_Print_Help >&2
+			exit 2
+			;;
+	esac
+done
+
+#
+# Parse trailing positional parameters
+# ($OPTIND, $OPTIND+1, $OPTIND+2, ...)
+#
+
+POS_PARAM1="${@:$OPTIND:1}"
+if [[ -n "${POS_PARAM1}" ]]; then
+	# no positional parameter at all is expected
+	echo "ERROR: Parameter ${POS_PARAM1} not expected!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+#------------------------------------------------------------------------------
+# Load SCU environment with global variables (e.g. DEBUG_LEVEL)
+#------------------------------------------------------------------------------
+
+f_Load_SCU_Env
+RETURN_CODE=$?
+if [[ ${RETURN_CODE} -gt 0 ]]; then
+	echo "ERROR: Failed to initialize the SCU runtime environment!" >&2
+	exit 3
+fi
+
+#
+# Adjust DEBUG_LEVEL (set in SCU_env) if verbose option was specified
+#
+
+if "${OPTION_LOWER_V}"; then
+	DEBUG_LEVEL=${DEBUG_LEVEL_DETAIL}
+fi
+
+#
+# Print details of this process
+#
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	. "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" f_SCU_Process_Info >&2 # source into
+	echo >&2
+fi
+
+#
+# Try to prepend 'sudo ' to commands requiring root privileges
+#
+
+if [[ "$(whoami)" != "root" ]]; then
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "Warning: Not started by root, using sudo" >&2
+	fi
+	CMD_PREFIX_SUDO="sudo "
+else
+	CMD_PREFIX_SUDO=""
+fi
+
+#------------------------------------------------------------------------------
+# Initialize <YYYYmmdd_HHMMSS>_SCU_launch_mission.log
+#------------------------------------------------------------------------------
+
+START_TIME_COMPACT=$(echo ${MY_START_TIME} | awk '{gsub("-|:", ""); print}')
+LOG_DIR="$(dirname ${SCU_HOME}/${F_SCU_LAUNCH_MISSION_LOG_REL})"
+F_SCU_LAUNCH_MISSION_LOG_NAME="$(basename ${F_SCU_LAUNCH_MISSION_LOG_REL})"
+LOG_FILE="${LOG_DIR}/${START_TIME_COMPACT}_${F_SCU_LAUNCH_MISSION_LOG_NAME}"
+
+if [[ ! -e "${LOG_DIR}" ]]; then
+	# Create log directory if missing
+	${CMD_PREFIX_SUDO}mkdir -p "${LOG_DIR}"
+	${CMD_PREFIX_SUDO}chmod "0775" "${LOG_DIR}"
+	${CMD_PREFIX_SUDO}chown "${SCU_USER_UID}:${SCU_USER_GID}" "${LOG_DIR}"
+fi
+
+if [[ -f "${LOG_FILE}" ]]; then
+	# Rename any existing log file (keep one previous version)
+	mv "${LOG_FILE}" \
+		"${LOG_FILE}.OLD"
+	${CMD_PREFIX_SUDO}chmod "0664" "${LOG_FILE}.OLD"
+	${CMD_PREFIX_SUDO}chown "${SCU_USER_UID}:${SCU_USER_GID}" "${LOG_FILE}.OLD"
+fi
+
+# Initialize new log file by writing a file header
+f_SCU_launch_mission_log_Header > "${LOG_FILE}"
+${CMD_PREFIX_SUDO}chmod "0664" "${LOG_FILE}"
+${CMD_PREFIX_SUDO}chown "${SCU_USER_UID}:${SCU_USER_GID}" "${LOG_FILE}"
+
+echo >> "${LOG_FILE}"
+. "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" f_SCU_Process_Info >> "${LOG_FILE}"
+
+echo >> "${LOG_FILE}"
+echo "Log file: ${LOG_FILE}" >> "${LOG_FILE}"
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	echo "Log file: ${LOG_FILE}" >&2
+fi
+
+#------------------------------------------------------------------------------
+# Perform main program
+#------------------------------------------------------------------------------
+
+#
+# Check if operation mode is science
+#
+
+EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send Operation_Mode"
+OPERATION_MODE="$(${EXEC_CMD})"
+
+if [[ "${OPERATION_MODE}" == "science" ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Current operation mode is science, science experiment can start" | \
+		tee -a "${LOG_FILE}"
+else
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Current operation mode is ${OPERATION_MODE}, disabling science" \
+		"experiment in this cycle" | tee -a "${LOG_FILE}"
+	MISSION_CLEAR_TO_GO=false # do not perform science related tasks
+fi
+
+#if "${MISSION_CLEAR_TO_GO}"; then
+#
+#	#
+#	# FYI only - Check if after first science start date
+#	#
+#
+#	# Get SCU_SCIENCE_START_DATE from SCU_env
+#	SCU_SCIENCE_START="${SCU_SCIENCE_START_DATE}"
+#	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+#		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+#			"Using first science start date from SCU_env" \
+#			"(SCU_SCIENCE_START_DATE=${SCU_SCIENCE_START})" | tee -a "${LOG_FILE}"
+#	fi
+#
+#	SCU_SCIENCE_START_NUM=$(echo ${SCU_SCIENCE_START} | \
+#		awk '{gsub("[-_:]+", ""); print}')
+#
+#	SCU_CURRENT_DATE_NUM=$(echo ${MY_START_TIME} | \
+#		awk '{gsub("[-_:]+", ""); print}')
+#
+#	if [[ "${SCU_CURRENT_DATE_NUM}" -ge "${SCU_SCIENCE_START_NUM}" ]]; then
+#		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+#			"Science can start, current date ("${MY_START_TIME}") is before" \
+#			"first possible start (${SCU_SCIENCE_START})" | tee -a "${LOG_FILE}"
+#	else
+#		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+#			"Science not allowed, current date ("${MY_START_TIME}") is before" \
+#			"first possible start (${SCU_SCIENCE_START})" | tee -a "${LOG_FILE}"
+#		SCIENCE_CLEAR_TO_GO=false # only perform test profiles
+#	fi
+#
+#fi
+
+if [[ "${OPERATION_MODE}" == "science" ]]; then
+	# Set default wakeup time - may be overwritten by profile if science is performed
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Wakeup 7200" # default to 2h for pause till next profile
+	${EXEC_CMD}
+else
+	# Set default wakeup time for non-science/recovery mode to 10m
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Wakeup 600" # default to 10m for pause till next profile
+	${EXEC_CMD}
+fi
+
+#------------------------------------------------------------------------------
+# Increment SCU cycle counter (SCU_cycle)
+#------------------------------------------------------------------------------
+
+echo >> "${LOG_FILE}"
+
+echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+	"Incrementing SCU cycle counter with ${F_BIN_SCU_CYCLE_REL}" | \
+	tee -a "${LOG_FILE}"
+
+EXEC_CMD="${SCU_HOME}/${F_BIN_SCU_CYCLE_REL} -i" # increment cycle number
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+		"Executing command: ${EXEC_CMD}"
+fi
+
+${EXEC_CMD} 2>&1 | tee -a "${LOG_FILE}"
+RETURN_CODE=${PIPESTATUS[0]}
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+		"Return code: ${RETURN_CODE}" | tee -a "${LOG_FILE}"
+fi
+
+if [[ "${RETURN_CODE}" -eq 0 ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Successfully incremented SCU cycle counter" | tee -a "${LOG_FILE}"
+else
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+		"Failed to increment SCU cycle counter" | tee -a "${LOG_FILE}"
+	if [[ ${MY_EXIT_RC} -eq 0 ]]; then # first error should be reported
+		MY_EXIT_RC=4
+	fi
+fi
+
+CURRENT_CYCLE_NUMBER="$(${SCU_HOME}/${F_BIN_SCU_CYCLE_REL} 2>/dev/null)"
+echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+	"Current cycle number is ${CURRENT_CYCLE_NUMBER}" | tee -a "${LOG_FILE}"
+
+#------------------------------------------------------------------------------
+# Mount USB memory (failback order: USB_A > USB_B > USB_X > SCU_HOME/data)
+#------------------------------------------------------------------------------
+
+echo >> "${LOG_FILE}"
+
+echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+	"Mounting USB memory for this mission" | tee -a "${LOG_FILE}"
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+fi
+
+MISSION_USB="USB_A" # try to mount USB_A first
+
+"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount "${MISSION_USB}"
+RETURN_CODE=$?
+
+if [[ ${RETURN_CODE=$?} -gt 0 ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+		"${MISSION_USB} unavailabe for this mission" | tee -a "${LOG_FILE}"
+	MISSION_USB=""
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+	fi
+fi
+
+if [[ "${MISSION_USB}" == "" ]]; then # USB_A unavailable for mission
+
+	MISSION_USB="USB_B" # try to mount USB_B next
+
+	"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount \
+		"${MISSION_USB}"
+	RETURN_CODE=$?
+
+	if [[ ${RETURN_CODE=$?} -gt 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"${MISSION_USB} unavailabe for this mission" | tee -a "${LOG_FILE}"
+		MISSION_USB=""
+
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+		fi
+	fi
+
+fi
+
+if [[ "${MISSION_USB}" == "" ]]; then # USB_B unavailable for mission
+
+	MISSION_USB="USB_X" # try to mount USB_X next
+
+	"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount \
+		"${MISSION_USB}"
+	RETURN_CODE=$?
+
+	if [[ ${RETURN_CODE=$?} -gt 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"${MISSION_USB} unavailabe for this mission" | tee -a "${LOG_FILE}"
+		MISSION_USB=""
+
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+		fi
+	fi
+
+fi
+
+if [[ "${MISSION_USB}" == "" ]]; then # USB_X unavailable for mission
+
+	MISSION_USB="data" # default to SCU_HOME/data if no USB memory is available
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Warning" \
+		"Defaulting to ${MISSION_USB}" | tee -a "${LOG_FILE}"
+
+fi
+
+echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+	"USB memory for this mission: ${MISSION_USB}" | tee -a "${LOG_FILE}"
+
+#------------------------------------------------------------------------------
+# Adjust cycle number if newer one found in USB directory
+#------------------------------------------------------------------------------
+
+LAST_USB_CYCLE=$(ls ${SCU_HOME}/${MISSION_USB} | awk \
+	'$1~/^[0-9]+$/ {print}' | sort -n | tail -1)
+
+if [[ ${LAST_USB_CYCLE} -ge ${CURRENT_CYCLE_NUMBER} ]]; then
+
+	# Increment cycle to next unused cycle number
+	NEW_CYCLE_NUMBER=${LAST_USB_CYCLE}+1
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Cycle ${LAST_USB_CYCLE} found on ${MISSION_USB} - adjusting cycle to" \
+		"${NEW_CYCLE_NUMBER}" | tee -a "${LOG_FILE}"
+
+	CURRENT_CYCLE_NUMBER="$(${SCU_HOME}/${F_BIN_SCU_CYCLE_REL} \
+		-i ${NEW_CYCLE_NUMBER} 2>/dev/null)"
+
+	if [[ ${CURRENT_CYCLE_NUMBER} -eq ${NEW_CYCLE_NUMBER} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Updated cycle number to ${NEW_CYCLE_NUMBER}" | \
+			tee -a "${LOG_FILE}"
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Failed to update cycle number to ${NEW_CYCLE_NUMBER}" | \
+			tee -a "${LOG_FILE}"
+	fi
+
+else
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"No cycle number greater ${CURRENT_CYCLE_NUMBER} found on" \
+		"${MISSION_USB}" | tee -a "${LOG_FILE}"
+fi
+
+#------------------------------------------------------------------------------
+# Create cycle directory for this mission
+#------------------------------------------------------------------------------
+
+MISSION_DIR="${SCU_HOME}/${MISSION_USB}/${CURRENT_CYCLE_NUMBER}"
+
+if "${MISSION_CLEAR_TO_GO}"; then
+
+	if [[ -e "${SCU_HOME}/${MISSION_USB}" ]]; then
+		if [[ ! -e "${MISSION_DIR}" ]]; then
+			${CMD_PREFIX_SUDO}mkdir "${MISSION_DIR}" >> "${LOG_FILE}" 2>&1
+			${CMD_PREFIX_SUDO}chown pi:pi "${MISSION_DIR}" >> "${LOG_FILE}" 2>&1
+			${CMD_PREFIX_SUDO}chmod 0775 "${MISSION_DIR}" >> "${LOG_FILE}" 2>&1
+		fi
+		PREVIOUS_PWD="$(pwd)" # take note of current working directory
+		cd "${MISSION_DIR}" >> "${LOG_FILE}" 2>&1
+
+		if [[ "$(pwd)" == "${MISSION_DIR}" ]]; then
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+				"Created directory ${MISSION_DIR}" | tee -a "${LOG_FILE}"
+		else
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+				"Failed to create ${MISSION_DIR}" | tee -a "${LOG_FILE}"
+		fi
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"No USB space available for science data" | tee -a "${LOG_FILE}"
+	fi
+
+else
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"No directory will be created for cycle ${CURRENT_CYCLE_NUMBER}" | \
+		tee -a "${LOG_FILE}"
+
+fi
+
+#------------------------------------------------------------------------------
+# Perform science experiment profile (SCU_experiment_main)
+#------------------------------------------------------------------------------
+
+if "${MISSION_CLEAR_TO_GO}"; then
+
+	# Turn on science power
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send Science_Power On"
+	${EXEC_CMD}
+
+	# Set default wakeup time - should be overwritten by science profile queue
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Wakeup 3600"
+	${EXEC_CMD} 2>&1 | tee -a "${LOG_FILE}"
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	# Extend keepalive for science
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Keepalive ${SCU_MISSION_KEEPALIVE_TIME}"
+	${EXEC_CMD} 2>&1 | tee -a "${LOG_FILE}"
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	# Run SCU_experiment_main
+	EXEC_CMD="${SCU_HOME}/${F_BIN_SCU_EXPERIMENT_MAIN_REL}"
+	sudo -u pi ${EXEC_CMD} 2>&1 | tee -a "${LOG_FILE}"
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	# Turn off science power
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send Science_Power Off"
+	${EXEC_CMD}
+
+	cd "${PREVIOUS_PWD}" >> "${LOG_FILE}" 2>&1 # return to previous directory
+
+else
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Recovery mode - skipping science" | tee -a "${LOG_FILE}"
+
+fi
+
+#------------------------------------------------------------------------------
+# Process experiment data and logs (SCU_process_data)
+#------------------------------------------------------------------------------
+
+echo >> "${LOG_FILE}"
+
+echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+	"Mounting USB memory for synchronizing this cycle" | tee -a "${LOG_FILE}"
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+fi
+
+SYNC_USB="USB_A"
+SYNC_DIR="${SCU_HOME}/${SYNC_USB}"
+
+if [[ "${SYNC_USB}" == "${MISSION_USB}" ]]; then
+	# MISSION_USB is already mounted but missing the log directory
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Copying ${LOG_DIR} to ${SYNC_DIR}" | tee -a "${LOG_FILE}"
+	${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+else
+	"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount "${SYNC_USB}"
+	RETURN_CODE=$?
+
+	if [[ ${RETURN_CODE=$?} -eq 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Copying ${MISSION_DIR} and ${LOG_DIR} to ${SYNC_DIR}" | \
+			tee -a "${LOG_FILE}"
+		${CMD_PREFIX_SUDO}rsync -rptv "${MISSION_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+		${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"${SYNC_USB} unavailabe for synchronization of ${MISSION_USB}" | \
+			tee -a "${LOG_FILE}"
+
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+		fi
+	fi
+fi
+
+SYNC_USB="USB_B"
+SYNC_DIR="${SCU_HOME}/${SYNC_USB}"
+
+if [[ "${SYNC_USB}" == "${MISSION_USB}" ]]; then
+	# MISSION_USB is already mounted but missing the log directory
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Copying ${LOG_DIR} to ${SYNC_DIR}" | tee -a "${LOG_FILE}"
+	${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+else
+	"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount "${SYNC_USB}"
+	RETURN_CODE=$?
+
+	if [[ ${RETURN_CODE=$?} -eq 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Copying ${MISSION_DIR} and ${LOG_DIR} to ${SYNC_DIR}" | \
+			tee -a "${LOG_FILE}"
+		${CMD_PREFIX_SUDO}rsync -rptv "${MISSION_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+		${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"${SYNC_USB} unavailabe for synchronization of ${MISSION_USB}" | \
+			tee -a "${LOG_FILE}"
+
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+		fi
+	fi
+fi
+
+SYNC_USB="USB_X"
+SYNC_DIR="${SCU_HOME}/${SYNC_USB}/TO_GROUND"
+
+if [[ "${SYNC_USB}" == "${MISSION_USB}" ]]; then
+	# MISSION_USB is already mounted but missing the log directory
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Copying ${LOG_DIR} to ${SYNC_DIR}" | tee -a "${LOG_FILE}"
+	${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+else
+	"${SCU_HOME}/${F_LIB_SCU_DEVICES_REL}" f_SCU_USB_Power_Mount "${SYNC_USB}"
+	RETURN_CODE=$?
+
+	if [[ ${RETURN_CODE=$?} -eq 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Copying ${MISSION_DIR} and ${LOG_DIR} to ${SYNC_DIR}" | \
+			tee -a "${LOG_FILE}"
+		if [[ ! -e "${SYNC_DIR}" ]]; then
+			${CMD_PREFIX_SUDO}mkdir "${SYNC_DIR}" >> "${LOG_FILE}" 2>&1
+			${CMD_PREFIX_SUDO}chown pi:pi "${SYNC_DIR}" >> "${LOG_FILE}" 2>&1
+			${CMD_PREFIX_SUDO}chmod 0775 "${SYNC_DIR}" >> "${LOG_FILE}" 2>&1
+		fi
+		${CMD_PREFIX_SUDO}rsync -rptv "${MISSION_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+		${CMD_PREFIX_SUDO}rsync -rptv "${LOG_DIR}" "${SYNC_DIR}/." | \
+			tee -a "${LOG_FILE}"
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"${SYNC_USB} unavailabe for synchronization of ${MISSION_USB}" | \
+			tee -a "${LOG_FILE}"
+
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -d >> "${LOG_FILE}"
+		fi
+	fi
+fi
+
+# Sync complete, all USB memories should be mounted and have a cycle dir now
+USB_FILES_MISSION="$(ls ${MISSION_DIR}	2>/dev/null | wc -l)"
+
+for USB_DIR in USB_A USB_B USB_X/TO_GROUND; do
+	USB_FILES_SYNC="$(ls ${SCU_HOME}/${USB_DIR}/${CURRENT_CYCLE_NUMBER} \
+		2>/dev/null | wc -l)"
+	if [[ "${USB_FILES_SYNC}" -eq "${USB_FILES_MISSION}" ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Files in ${USB_DIR}/${CURRENT_CYCLE_NUMBER}: ${USB_FILES_SYNC}" | \
+			tee -a "${LOG_FILE}"
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Files in ${USB_DIR}/${CURRENT_CYCLE_NUMBER} (${USB_FILES_SYNC})" \
+			"differ from cycle dir ${MISSION_DIR} (${USB_FILES_MISSION})" | \
+			tee -a "${LOG_FILE}"
+	fi
+done
+
+#------------------------------------------------------------------------------
+# Create system and experiment report (SCU_status_report)
+#------------------------------------------------------------------------------
+
+echo "Creating system report"
+
+# Set SCU keepalive 5m (300) for creation of system report
+EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+	SCU_Keepalive 300"
+
+STATUS_REPORT="${SCU_HOME}/log/$(date +${DATE_FORMAT_SHORT})_SCU_status_report.out"
+"${SCU_HOME}/${F_BIN_SCU_STATUS_REPORT_REL}" > "${STATUS_REPORT}" 2>&1
+
+${CMD_PREFIX_SUDO}chmod "0664" "${STATUS_REPORT}"
+${CMD_PREFIX_SUDO}chown "${SCU_USER_UID}:${SCU_USER_GID}" "${STATUS_REPORT}"
+
+SYNC_DIR="${SCU_HOME}/USB_A/log"
+if [[ -e "${SYNC_DIR}" ]]; then
+	${CMD_PREFIX_SUDO}rsync -rptv "${STATUS_REPORT}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+fi
+
+SYNC_DIR="${SCU_HOME}/USB_B/log"
+if [[ -e "${SYNC_DIR}" ]]; then
+	${CMD_PREFIX_SUDO}rsync -rptv "${STATUS_REPORT}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+fi
+
+SYNC_DIR="${SCU_HOME}/USB_X/log"
+if [[ -e "${SYNC_DIR}" ]]; then
+	${CMD_PREFIX_SUDO}rsync -rptv "${STATUS_REPORT}" "${SYNC_DIR}/." | \
+		tee -a "${LOG_FILE}"
+fi
+
+### SCU_boot: Check if booted from alt SD card (after date ist set)
+### then correct last cycle number, apply updates
+	# var/SCU_last_boot.cf
+	#   cat /sys/block/mmcblk0/device/cid
+	#   cat /sys/block/mmcblk0/device/csd
+	#   Return value of MCU query
+	# lsblk -l -n -o NAME,MOUNTPOINT,UUID,SERIAL
+	# ROOTFS_UUID=$(lsblk -f | awk '$NF=="/" {print $(NF-1)}')
+
+# Unmount / power off USB
+"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -ua
+"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -qa
+
+if "${SCU_DEVELOPMENT_MODE}"; then
+	# Development mode: DO NOT SHUTDOWN AFTER MISSION (maximum SCU keepalive)
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Keepalive 32767"
+else
+	# Set SCU keepalive 3m (180) for troubleshooting
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+		SCU_Keepalive 180"
+fi
+${EXEC_CMD}
+
+exit
+
+###############################################################################
+# EOF
+###############################################################################
+

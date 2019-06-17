@@ -1,0 +1,567 @@
+##############################################################################
+#
+# SCU_Profile.1004
+#
+# Science experiment profile / technical test
+#
+# Test: Increment and record voltage until first ignition occurs
+#
+# DO NOT USE shebang (#!) IN LINE ONE OR 'exit' ANYWHERE IN THIS SCRIPT!
+#
+# $LOCATION ${SCU_HOME}/profiles
+#
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_camera
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_capacitor
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_ignition
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_LED
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_MCU_message
+#
+# $RETURNS {none}
+#
+# $COMPONENT_NAME MLU.SCU.SCU_Profile.1004
+# $VERSION_NUMBER 0.6.5
+# $VERSION_DATE 2018-12-09_02:10:10
+#
+###############################################################################
+
+#
+# Variables to control initial and maximum ignition voltage and increment
+#
+
+typeset -i IGNITION_VOLTAGE_INITIAL=350 # voltage for first ignition attempt
+typeset -i IGNITION_VOLTAGE_MAX=450     # maximum voltage to try ignition with
+typeset -i IGNITION_VOLTAGE_INCREMENT=5 # voltage to add for next attempts
+
+#-----------------------------------------------------------
+
+#
+# Log temperatures reported by sensors
+#
+for TEMP_SENSOR in rst0 rst1 rst2 rst3 rst4 rst5 rst6 rst7 rst8 rst9 rst10 \
+	rst11 rst12; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${TEMP_SENSOR}
+done
+
+#
+# Log Raspberry SoC (BCM2835) temperature
+#
+vcgencmd measure_temp
+
+#
+# Log PSU data (rsc: status charger, rsg: status gauge) from MCU
+#
+for MCU_REPORT in rsc rsg; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${MCU_REPORT}
+done
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s ImgCal_b0f0                        # take 1 still image
+
+#
+# Take one image with front light on only
+#
+MLU_LED -b 0                                     # turn off back LED
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b0f150                      # take 1 still image
+
+#
+# Take one image with back light on only
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 0                                     # turn off front LED
+MLU_camera -s ImgCal_b1f0                        # take 1 still image
+
+#
+# Take one image with front and back light on
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b1f150                      # take 1 still image
+
+echo
+echo "#------------------------------------------"
+echo "# Pre experiement end"
+echo "#------------------------------------------"
+echo
+
+##################################################
+# Try to find minimum voltage for first successful
+# ignition, starting with last voltage tested
+# (IGNITION_VOLTAGE_TESTED) or default voltage if
+# no test was performed so far
+# (IGNITION_VOLTAGE_INITIAL).
+##################################################
+
+#
+# Read last tested ignition voltage from config file (if present)
+#
+if [[ -r "${SCU_HOME}/var/MLU_science.cf" ]]; then
+
+	typeset -i IGNITION_VOLTAGE_TESTED="$(awk -F "=" \
+		'$1=="IGNITION_VOLTAGE_TESTED" {print $2}' \
+		${SCU_HOME}/var/MLU_science.cf 2>/dev/null)"
+
+	IGNITION_VOLTAGE_SUCCESS="$(awk -F "=" \
+		'$1=="IGNITION_VOLTAGE_SUCCESS" {print $2}' \
+		${SCU_HOME}/var/MLU_science.cf 2>/dev/null)"
+
+else
+
+	#
+	# No ignition voltage was ever logged, start with defaults
+	#
+	typeset -i IGNITION_VOLTAGE_TESTED=${IGNITION_VOLTAGE_INITIAL}
+	IGNITION_VOLTAGE_SUCCESS=false
+
+	#
+	# Create config file with default values
+	#
+	echo "IGNITION_VOLTAGE_TESTED=${IGNITION_VOLTAGE_TESTED}" \
+		>${SCU_HOME}/var/MLU_science.cf
+	echo "IGNITION_VOLTAGE_SUCCESS=${IGNITION_VOLTAGE_SUCCESS}" \
+		>>${SCU_HOME}/var/MLU_science.cf
+
+fi
+
+if ${IGNITION_VOLTAGE_SUCCESS}; then
+
+	echo "Ignition voltage ${IGNITION_VOLTAGE_TESTED}V was successfully" \
+		"tested. Skipping ignition tests."
+
+else
+
+	echo "Ignition voltage ${IGNITION_VOLTAGE_TESTED}V was not successfully" \
+		"tested yet! Performing ignition tests."
+
+	while [[ ${IGNITION_VOLTAGE_TESTED} -le ${IGNITION_VOLTAGE_MAX} ]]; do
+
+		#
+		# Try up to 8x to perform ignition at current voltage
+		#
+		for ((i=1;i<=8;i++)); do                   # repeat 8 times
+
+			echo "Performing ignition attempt ${i} at ${IGNITION_VOLTAGE_TESTED}V"
+
+			#-----------------------------------------------------------
+
+			#
+			# Start video recording for 90s in background
+			#
+			MLU_camera -d Video_b1f150_0 -t 90 &    # record 90s video with '&'
+			PID=$!                                  # take note of MLU_camera PID
+
+			#
+			# Charge capacitors to 350V (in background via MCU)
+			#
+			MLU_capacitor -c ${IGNITION_VOLTAGE_TESTED} # charge capacitors
+
+			#
+			# Wait for video to finish
+			#
+			wait $PID                               # wait for PID of '&' job
+
+			#
+			# Wait for full charge of capacitors
+			#
+			MLU_capacitor -w                        # wait for full charge
+
+			#
+			# Take one image
+			#
+			MLU_camera -s Image_b1f150              # take 1 still image
+
+			#
+			# Start video recording for 90s in background
+			#
+			MLU_camera -d Video_b1f150_1 -t 90 &    # record 90s video with '&'
+			PID=$!                                  # take note of MLU_camera PID
+
+			#
+			# Wait for 5s
+			#
+			sleep 5                                 # wait for 5s
+
+			#
+			# Vibration 1x 10s in background
+			#
+			MLU_shaker -s 10 -w 58_58_58_58_58_58_58_58 & # shake for 10s
+			PID2=$!                                       # take note of PID
+
+			#
+			# Wait for 5s
+			#
+			sleep 5                                 # wait for 5s
+
+			#
+			# Perform ignition
+			#
+			MLU_ignition -i ${IGNITION_VOLTAGE_TESTED} # ignition at 350V
+
+			#
+			# Wait for shaker to finish
+			#
+			wait $PID2                              # wait for PID2 of '&' job
+
+			#
+			# Wait for video to finish
+			#
+			wait $PID                               # wait for PID of '&' job
+
+			#-----------------------------------------------------------
+
+			#
+			# Check if last ignition attempt was successful
+			#
+			LIB_MCU_MESSAGE="${SCU_HOME}/lib/lib_MCU_message"
+			IGNITION_RESULT="$(${LIB_MCU_MESSAGE} f_MCU_send ris | \
+				awk '$1=="last_ignition_result" {print $3}')"
+
+			if [[ "${IGNITION_RESULT}" == "AA" ]]; then
+
+				#
+				# Ignition occured with current voltage
+				#
+				IGNITION_VOLTAGE_SUCCESS=true
+
+				#
+				# Update config file
+				#
+				echo "IGNITION_VOLTAGE_TESTED=${IGNITION_VOLTAGE_TESTED}" \
+					>${SCU_HOME}/var/MLU_science.cf
+				echo "IGNITION_VOLTAGE_SUCCESS=${IGNITION_VOLTAGE_SUCCESS}" \
+					>>${SCU_HOME}/var/MLU_science.cf
+
+				break # stop the test loop for current voltage
+
+			else
+
+				#
+				# Ignition failed, retry (with same or higher voltage)
+				#
+				echo "Ignition at ${IGNITION_VOLTAGE_TESTED}V failed with error" \
+					"${IGNITION_RESULT}"
+
+			fi
+
+			sleep 10                                # wait for 10s
+
+		done
+
+		#
+		# No more ignition attempt at current voltage
+		#
+
+		if ${IGNITION_VOLTAGE_SUCCESS}; then
+
+			#
+			# Ignition occured, no need to increase voltage to try again
+			#
+			break # stop the voltage increment loop
+
+		else
+
+			#
+			# Increase ignition voltage and retry (in this loop)
+			#
+			IGNITION_VOLTAGE_TESTED=${IGNITION_VOLTAGE_TESTED}+${IGNITION_VOLTAGE_INCREMENT}
+
+			#
+			# Update config file
+			#
+			echo "IGNITION_VOLTAGE_TESTED=${IGNITION_VOLTAGE_TESTED}" \
+				>${SCU_HOME}/var/MLU_science.cf
+			echo "IGNITION_VOLTAGE_SUCCESS=${IGNITION_VOLTAGE_SUCCESS}" \
+				>>${SCU_HOME}/var/MLU_science.cf
+
+		fi
+
+	done
+fi
+
+#-----------------------------------------------------------
+
+#
+# Continue collection of data only if ignition occured
+#
+
+if ${IGNITION_VOLTAGE_SUCCESS}; then
+
+	#
+	# Repeat 4x
+	#
+	for ((i=2;i<=5;i++)); do                      # repeat 4 times
+
+		echo "Iteration: ${i}"
+
+		#
+		# Take one image
+		#
+		MLU_camera -s Image_b1f150                 # take 1 still image
+
+		#
+		# Record video for 90s
+		#
+		MLU_camera -d Video_b1f150_${i} -t 90      # record 90s video
+
+	done
+
+fi
+
+#-----------------------------------------------------------
+
+echo
+echo "#------------------------------------------"
+echo "# Post experiement Part 1 start"
+echo "#------------------------------------------"
+echo
+
+#
+# Take one image with front and back light on
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b1f150                      # take 1 still image
+
+#
+# Take one image with front light on only
+#
+MLU_LED -b 0                                     # turn off back LED
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b0f150                      # take 1 still image
+
+#
+# Take one image with back light on only
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 0                                     # turn off front LED
+MLU_camera -s ImgCal_b1f0                        # take 1 still image
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s ImgCal_b0f0                        # take 1 still image
+
+#
+# Log temperatures reported by sensors (debug)
+#
+for TEMP_SENSOR in rst0 rst1 rst2 rst3 rst4 rst5 rst6 rst7 rst8 rst9 rst10 \
+	rst11 rst12; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${TEMP_SENSOR}
+done
+
+#
+# Log Raspberry SoC (BCM2835) temperature
+#
+vcgencmd measure_temp
+
+#
+# Log PSU data (rsc: status charger, rsg: status gauge) from MCU
+#
+for MCU_REPORT in rsc rsg; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${MCU_REPORT}
+done
+
+#
+# Generate checksums for video files
+#
+for VIDEO in Video_*.h264; do
+	openssl dgst -md5 ${VIDEO} > $(basename ${VIDEO} .h264).md5
+done
+
+#
+# Log temperatures reported by sensors (debug)
+#
+for TEMP_SENSOR in rst0 rst1 rst2 rst3 rst4 rst5 rst6 rst7 rst8 rst9 rst10 \
+	rst11 rst12; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${TEMP_SENSOR}
+done
+
+#
+# Log Raspberry SoC (BCM2835) temperature
+#
+vcgencmd measure_temp
+
+#
+# Log PSU data (rsc: status charger, rsg: status gauge) from MCU
+#
+for MCU_REPORT in rsc rsg; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${MCU_REPORT}
+done
+
+#
+# Wait for 1800s
+#
+sleep 1800                                       # wait for 30m
+
+echo
+echo "#------------------------------------------"
+echo "# Experiement part 2 - Fotos"
+echo "#------------------------------------------"
+echo
+
+#
+# Turn on fort+back LEDs
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+
+#
+# Start video recording for 60s in background
+#
+MLU_camera -d Video_b1f150_0 -t 60 &             # record 60s video with '&'
+PID=$!                                           # take note of MLU_camera PID
+
+#
+# Wait for 10s
+#
+sleep 10                                         # wait for 10s
+
+#
+# Vibration 1x 10s
+#
+MLU_shaker -s 10 -w 58_58_58_58_58_58_58_58      # shake for 10s
+
+#
+# Wait for 10s and perform test ignition (sparc without arc)
+#
+sleep 10                                         # wait for 10s
+MLU_ignition -t                                  # TEST ignition (no arc)
+
+#
+# Wait for video to finish
+#
+wait $PID                                        # wait for PID of '&' job
+
+#
+# Repeat 240x (1 picture every 15s)
+# taking a picture takes ~9s
+#
+for ((i=1;i<=240;i++)); do                       # repeat 240 times
+
+	echo "Iteration: ${i}"
+
+	#
+	# Turn on front and back light
+	#
+	MLU_LED -b 1                                  # turn on back LED at 1/255
+	MLU_LED -f 150                                # turn on front LED at 150/255
+
+	#
+	# Take one bright image - high resolution (default)
+	#
+	MLU_camera -s Image_b1f150_${i}               # take 1 still image
+
+	#
+	# Turn off front and back light
+	#
+	MLU_LED -a 0                                  # turn off back+front LED
+
+	#
+	# Wait for 6s
+	#
+	sleep 6                                       # wait for 6s
+
+done
+
+echo
+echo "#------------------------------------------"
+echo "# Post experiement start"
+echo "#------------------------------------------"
+echo
+
+#
+# Take one image with front and back light on
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b1f150                      # take 1 still image
+
+#
+# Take one image with front light on only
+#
+MLU_LED -b 0                                     # turn off back LED
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s ImgCal_b0f150                      # take 1 still image
+
+#
+# Take one image with back light on only
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 0                                     # turn off front LED
+MLU_camera -s ImgCal_b1f0                        # take 1 still image
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s ImgCal_b0f0                        # take 1 still image
+
+#
+# Log temperatures reported by sensors (debug)
+#
+for TEMP_SENSOR in rst0 rst1 rst2 rst3 rst4 rst5 rst6 rst7 rst8 rst9 rst10 \
+	rst11 rst12; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${TEMP_SENSOR}
+done
+
+#
+# Log Raspberry SoC (BCM2835) temperature
+#
+vcgencmd measure_temp
+
+#
+# Log PSU data (rsc: status charger, rsg: status gauge) from MCU
+#
+for MCU_REPORT in rsc rsg; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${MCU_REPORT}
+done
+
+#
+# Generate checksums for video files
+#
+for VIDEO in Video_*.h264; do
+	openssl dgst -md5 ${VIDEO} > $(basename ${VIDEO} .h264).md5
+done
+
+#
+# Generate checksums for PNG images
+#
+for VIDEO in ImgCal_*.png Image_*.png; do
+	openssl dgst -md5 ${VIDEO} > $(basename ${VIDEO} .png).md5
+done
+
+#
+# Generate checksums for JPG images
+#
+for VIDEO in ImgCal_*.jpg Image_*.png; do
+	openssl dgst -md5 ${VIDEO} > $(basename ${VIDEO} .jpg).md5
+done
+
+#
+# Log temperatures reported by sensors
+#
+for TEMP_SENSOR in rst0 rst1 rst2 rst3 rst4 rst5 rst6 rst7 rst8 rst9 rst10 \
+	rst11 rst12; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${TEMP_SENSOR}
+done
+
+#
+# Log Raspberry SoC (BCM2835) temperature
+#
+vcgencmd measure_temp
+
+#
+# Log PSU data (rsc: status charger, rsg: status gauge) from MCU
+#
+for MCU_REPORT in rsc rsg; do
+	${SCU_HOME}/lib/lib_MCU_message f_MCU_send ${MCU_REPORT}
+done
+
+###############################################################################
+# EOF
+###############################################################################
+

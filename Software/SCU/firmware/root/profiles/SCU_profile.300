@@ -1,0 +1,36 @@
+###############################################################################
+#
+# SCU_Profile.300
+#
+# Science experiment profile / maintenance
+#
+# Maintenance: Deletes SCU_HOME/var/MLU_science.cf to reset to defaults
+#
+# DO NOT USE shebang (#!) IN LINE ONE OR 'exit' ANYWHERE IN THIS SCRIPT!
+#
+# $LOCATION ${SCU_HOME}/profiles
+#
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_camera
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_LED
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_MCU_message
+#
+# $RETURNS {none}
+#
+# $COMPONENT_NAME MLU.SCU.SCU_Profile.300
+# $VERSION_NUMBER 0.6.2
+# $VERSION_DATE 2018-12-10_20:30:00
+#
+###############################################################################
+
+#
+# The sole purpose of this profile is to delete ${SCU_HOME}/var/MLU_science.cf
+# so Profile 1004 can start another time with defaults trying to find the
+# minimum voltage required for a successful ignition.
+#
+
+mv ${SCU_HOME}/var/MLU_science.cf ${SCU_HOME}/var/MLU_science.cf.run1
+
+###############################################################################
+# EOF
+###############################################################################
+

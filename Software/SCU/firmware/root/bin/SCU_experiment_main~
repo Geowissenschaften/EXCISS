@@ -1,0 +1,421 @@
+#!/bin/bash
+#
+# SCU_experiment_main
+#
+
+# Requires: SCU_cycle
+# Expects work directory to match the current experiment cycle
+# i.e. SCU_HOME/USB_?/<Cycle>
+# Expects science power to be on (wps1) - done by SCU_launch_mission
+
+MY_START_TIME="$(date +%Y-%m-%d_%H:%M:%S)" # current time early after start
+MY_DIR_NAME="$(dirname $0)" # directory where this script is located
+MY_FILE_NAME="$(basename $0)" # file name of this script (without path)
+MY_BASE_NAME="$(basename ${MY_FILE_NAME} .sh)" # script name without ".sh"
+MY_EXEC_USER="$(whoami 2>/dev/null)" # name of user who started this script
+MY_PROCESS_ID="$(ps -fp $$ -o pid= | awk '{print $1}')" # PID of this script
+MY_PARENT_ID="$(ps -fp $$ -o ppid= | awk '{print $1}')" # PID of parent process
+MY_ARG_COUNT="$#" # number of parameters passed to this script
+MY_ARG_LIST="$@" # list of all parameters passed to this script
+WORK_DIR_NAME="$(pwd)" # current work directory of shell starting this script
+
+typeset -i RETURN_CODE=0 # return code of previous command (0=success)
+typeset -i MY_EXIT_RC=0 # return code of this script (0=success)
+typeset -i OPT_EXCLUSIVE_COUNT=0 # counter for mutually exclusive options
+typeset -i OPT_REQUIRED_COUNT=0 # counter for required options
+
+F_LIB_MCU_MESSAGE_REL="lib/lib_MCU_message" # library lib_MCU_message
+F_LIB_SCU_BASE_REL="lib/lib_SCU_base" # library lib_SCU_base
+F_LIB_SCU_DEVICES_REL="lib/lib_SCU_devices" # library lib_SCU_devices
+F_BIN_SCU_CYCLE_REL="bin/SCU_cycle" # binary SCU_cycle
+F_BIN_SCU_EXPERIMENT_MAIN_REL="bin/SCU_experiment_main" # SCU_experiment_main
+F_BIN_SCU_PROCESS_DATA_REL="bin/SCU_process_data" # binary SCU_process_data
+F_BIN_SCU_STATUS_REPORT_REL="bin/SCU_status_report" # binary SCU_status_report
+F_BIN_USB_MEMORY_REL="bin/USB_memory" # binary USB_memory
+F_BIN_MLU_BATTERY_REL="bin/MLU_battery" # binary MLU_battery
+
+typeset -i PROFILE_QUEUE_ITERATIONS=0
+
+export SCU_HOME="/opt/MLU/SCU"
+. "${SCU_HOME}/etc/SCU_env"
+
+SCU_CYCLE_CMD="${SCU_HOME}/bin/SCU_cycle"
+SCU_PROFILE_QUEUE="${SCU_HOME}/var/SCU_profile_queue.cf"
+SCU_PROFILE_QUEUE_TEMP="${SCU_PROFILE_QUEUE}.NEW"
+SCU_PROFILE_DIR="${SCU_HOME}/profiles"
+SCU_PROFILE_NAME_BASE="SCU_profile"
+
+SCU_MISSION_KEEPALIVE_TIME="3600" # keepalive time for SCU_boot [s] (60m = 1h)
+SCIENCE_CLEAR_TO_GO=true # science experiment can be carried out
+
+#
+# Check if operation mode is science
+# in case this script is called directly, not from SCU_launch_mission
+#
+
+EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send Operation_Mode"
+echo "Executing command: ${EXEC_CMD}"
+OPERATION_MODE="$(${EXEC_CMD})"
+
+if [[ "${OPERATION_MODE}" == "science" ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Current operation mode is science, science experiment can start"
+else
+	# Can not continue with this profile (recovery mode)
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+		"Not in science mode, terminating current mission" >&2
+	exit 1
+fi
+
+#
+# Check if after first science start date
+#
+
+if "${SCU_DEVELOPMENT_MODE}"; then
+	# SCU development mode: disable date check
+	SCU_SCIENCE_START="1970-01-01_01:00:00"
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"SCU development mode: Deactivating science start date" \
+		"(${SCU_SCIENCE_START})"
+else
+	# Use SCU_SCIENCE_START_DATE from SCU_env
+	SCU_SCIENCE_START="${SCU_SCIENCE_START_DATE}"
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Using first science start date from SCU_env" \
+			"(SCU_SCIENCE_START_DATE=${SCU_SCIENCE_START})"
+	fi
+fi
+
+SCU_SCIENCE_START_NUM=$(echo ${SCU_SCIENCE_START} | \
+	awk '{gsub("[-_:]+", ""); print}')
+
+SCU_CURRENT_DATE_NUM=$(echo ${MY_START_TIME} | \
+	awk '{gsub("[-_:]+", ""); print}')
+
+if [[ "${SCU_CURRENT_DATE_NUM}" -ge "${SCU_SCIENCE_START_NUM}" ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Science can start, current date ("${MY_START_TIME}") is after" \
+		"first possible start (${SCU_SCIENCE_START})"
+else
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Science not allowed, current date ("${MY_START_TIME}") is before" \
+		"first possible start (${SCU_SCIENCE_START})"
+	SCIENCE_CLEAR_TO_GO=false # do not perform science related tasks
+fi
+
+#
+# Start science only if battery has a minimum voltage of 14.0V
+#
+
+if "${SCU_DEVELOPMENT_MODE}"; then
+	# SCU development mode: ignore missing PSU (BATTERY_VOLTAGE="-1")
+	BATTERY_VOLTAGE="${SCU_SCIENCE_MIN_BATTERY}" # set battery voltage
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"SCU Development mode: Setting battery voltage to ${BATTERY_VOLTAGE}"
+else
+	# Query current battery voltage from MCU
+	BATTERY_VOLTAGE="$(${SCU_HOME}/${F_BIN_MLU_BATTERY_REL} -u 2>/dev/null)"
+fi
+
+if [[ "${BATTERY_VOLTAGE}" -lt "${SCU_SCIENCE_MIN_BATTERY}" ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Warning" \
+		"Battery voltage (${BATTERY_VOLTAGE}mV) is less than minimum voltage" \
+		"(${SCU_BOOT_MIN_BATTERY}mV) required for science"
+	SCIENCE_CLEAR_TO_GO=false # do not perform science related tasks
+fi
+
+SCU_CYCLE_NUMBER="$(${SCU_HOME}/bin/SCU_cycle 2>/dev/null)"
+WORK_DIRECTORY="$(pwd)"
+
+if [[ ! "${WORK_DIRECTORY}" == \
+		"${SCU_HOME}/USB_"?"/${SCU_CYCLE_NUMBER}" ]]; then
+	echo "Warning: Work directory does not match experiment cycle!" >&2
+fi
+
+# Select next profile from top of queue
+PROFILE_NUMBER=$(cat ${SCU_PROFILE_QUEUE} | \
+	awk -F ";" '$1~/^[0-9]+$/ {print $1; exit}')
+
+if [[ "${PROFILE_NUMBER}" == "" ]]; then
+	PROFILE_NUMBER="0" # no next profile found
+fi
+
+#
+# Use profile 500 after 5d without science (5*24*60*60 = 432000)
+#
+
+if "${SCIENCE_CLEAR_TO_GO}"; then
+	# Check if first science date was recorded
+	SCU_FIRST_SCIENCE_DATE="$(cat ${SCU_HOME}/var/SCU_first_science_date.cf \
+		2>/dev/null)"
+
+	if [[ "${SCU_FIRST_SCIENCE_DATE}" == "" ]]; then
+		# Today is the first science date (no previous file)
+		CURRENT_DATE=$(date -u +"%s")
+		echo "${CURRENT_DATE}" > ${SCU_HOME}/var/SCU_first_science_date.cf
+		echo "Saved current date (${CURRENT_DATE}) to" \
+			"${SCU_HOME}/var/SCU_first_science_date.cf"
+	fi
+
+	if [[ "${PROFILE_NUMBER}" == "0" ]]; then
+		SCU_FIRST_SCIENCE_DATE="$(cat ${SCU_HOME}/var/SCU_first_science_date.cf \
+			2>/dev/null)"
+		typeset -i EMERGENCY_SCIENCE_START_DATE="${SCU_FIRST_SCIENCE_DATE}+432000"
+
+		if [[ "${SCU_FIRST_SCIENCE_DATE}" != "" ]]; then
+
+			CURRENT_DATE=$(date -u +"%s")
+			echo "Current date: ${CURRENT_DATE}"
+			echo "SCU_FIRST_SCIENCE_DATE=${SCU_FIRST_SCIENCE_DATE}"
+			echo "EMERGENCY_SCIENCE_START_DATE=${EMERGENCY_SCIENCE_START_DATE}"
+
+			if [[ "${CURRENT_DATE}" -gt "${EMERGENCY_SCIENCE_START_DATE}" ]]; then
+				PROFILE_NUMBER="500"
+				PROFILE_QUEUE_ITERATIONS="1"
+				PROFILE_QUEUE_TIMEOUT="0"
+				PROFILE_QUEUE_PAUSE="7200"
+				PROFILE_QUEUE_COMMENT="emergency profile"
+				PROFILE_FILE="${SCU_PROFILE_DIR}/${SCU_PROFILE_NAME_BASE}.${PROFILE_NUMBER}"
+				echo "Starting emergency profile ${PROFILE_NUMBER} after 5d"
+			else
+				echo "Too early for emergency profile"
+			fi
+
+		fi
+	fi
+
+fi
+
+if ! "${SCIENCE_CLEAR_TO_GO}" && [[ "${PROFILE_NUMBER}" -ge 500 ]]; then
+	#echo "Warning: ${PROFILE_NUMBER} is a science profile, so falling" \
+	#	"back to test profile 201" >&2
+	#PROFILE_NUMBER=201
+	#PROFILE_QUEUE_ITERATIONS="1"
+	#PROFILE_QUEUE_TIMEOUT="0"
+	#PROFILE_QUEUE_PAUSE="7200"
+	#PROFILE_QUEUE_COMMENT="starts immediately after 1st power on"
+	#PROFILE_FILE="${SCU_PROFILE_DIR}/${SCU_PROFILE_NAME_BASE}.${PROFILE_NUMBER}"
+	echo "Warning: Skipping science profile ${PROFILE_NUMBER}" >&2
+	PROFILE_NUMBER=0
+	PROFILE_QUEUE_ITERATIONS="1"
+	PROFILE_QUEUE_TIMEOUT="0"
+	PROFILE_QUEUE_PAUSE="7200"
+	PROFILE_QUEUE_COMMENT="starts immediately after 1st power on"
+	PROFILE_FILE="${SCU_PROFILE_DIR}/${SCU_PROFILE_NAME_BASE}.${PROFILE_NUMBER}"
+
+else
+
+	# Extract parameters from Queue
+	# Queue entries: Profile[;Iterations[;Timeout[;Pause]]]
+	PROFILE_QUEUE_ITERATIONS=$(cat ${SCU_PROFILE_QUEUE} | \
+		awk -F ";" -v PROFILE="${PROFILE_NUMBER}" '$1 == PROFILE \
+		{gsub("( )*#(.)*$", ""); print $2; exit}')
+
+	PROFILE_QUEUE_TIMEOUT=$(cat ${SCU_PROFILE_QUEUE} | \
+		awk -F ";" -v PROFILE="${PROFILE_NUMBER}" '$1 == PROFILE \
+		{gsub("( )*#(.)*$", ""); print $3; exit}')
+
+	PROFILE_QUEUE_PAUSE=$(cat ${SCU_PROFILE_QUEUE} | \
+		awk -F ";" -v PROFILE="${PROFILE_NUMBER}" '$1 == PROFILE \
+		{gsub("( )*#(.)*$", ""); print $4; exit}')
+
+	PROFILE_QUEUE_COMMENT=$(cat ${SCU_PROFILE_QUEUE} | \
+		awk -F ";" -v PROFILE="${PROFILE_NUMBER}" '$1 == PROFILE \
+		{gsub("^[^#]*#", ""); print; exit}')
+
+	PROFILE_FILE="${SCU_PROFILE_DIR}/${SCU_PROFILE_NAME_BASE}.${PROFILE_NUMBER}"
+
+fi
+
+# Add SCU_HOME/bin to PATH so MLU_commands are executable just by name
+export PATH="${PATH}:${SCU_HOME}/bin"
+
+echo
+echo "SCU cycle number:    ${SCU_CYCLE_NUMBER}"
+echo "Work directory:      ${WORK_DIRECTORY}"
+echo
+echo "Profile queue:       ${SCU_PROFILE_QUEUE}"
+echo "Next profile:        ${PROFILE_NUMBER}"
+if [[ "${PROFILE_NUMBER}" -gt 0 ]]; then
+	echo "Iterations:          ${PROFILE_QUEUE_ITERATIONS}"
+	echo "Timeout (keepalive): ${PROFILE_QUEUE_TIMEOUT}"
+	echo "Pause (wakeup):      ${PROFILE_QUEUE_PAUSE}"
+	echo
+	if [[ -f "${PROFILE_FILE}" ]]; then
+		echo "Profile file: ${PROFILE_FILE} (exists)"
+	else
+		echo "Profile file: ${PROFILE_FILE} (does not exist)"
+	fi
+fi
+
+# Start profile only if enough time till next data transfer window
+EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send Next_Datatransfer"
+NEXT_DATATRANSFER="$(${EXEC_CMD})"
+
+typeset -i PROFILE_EXECUTION_TIME=0
+if [[ "${PROFILE_QUEUE_TIMEOUT}" != "" && "${PROFILE_QUEUE_TIMEOUT}" -gt 0 ]]; then
+	PROFILE_EXECUTION_TIME=${PROFILE_QUEUE_TIMEOUT}+300
+else
+	PROFILE_EXECUTION_TIME=3900 # default to 1h (3600s) + 300s buffer
+fi
+
+
+
+if [[ "${PROFILE_EXECUTION_TIME}" -lt "${NEXT_DATATRANSFER}" ]]; then
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Current operation mode is science, science experiment can start" | \
+		tee -a "${LOG_FILE}"
+else
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Current operation mode is ${OPERATION_MODE}, disabling science" \
+		"experiment in this cycle" | tee -a "${LOG_FILE}"
+	MISSION_CLEAR_TO_GO=false # do not perform science related tasks
+fi
+
+
+
+
+
+
+
+
+if [[ -f "${PROFILE_FILE}" ]]; then
+
+	echo
+	echo "Processing profile $(basename ${PROFILE_FILE})"
+
+	PROFILE_LOG="${WORK_DIRECTORY}/$(date +%Y%m%d_%H%M%S)_${SCU_CYCLE_NUMBER}_SCU_profile.${PROFILE_NUMBER}.log"
+	echo "Log file: ${PROFILE_LOG}"
+
+	echo "##################################################" > ${PROFILE_LOG}
+	echo "#" >> ${PROFILE_LOG}
+	echo "# SCU_Profile.${PROFILE_NUMBER} Execution Log" >> ${PROFILE_LOG}
+	echo "#" >> ${PROFILE_LOG}
+	echo "##################################################" >> ${PROFILE_LOG}
+	echo >> ${PROFILE_LOG}
+	echo "SCU cycle number: ${SCU_CYCLE_NUMBER}" >> ${PROFILE_LOG}
+	echo "Work directory: ${WORK_DIRECTORY}" >> ${PROFILE_LOG}
+	echo >> ${PROFILE_LOG}
+	echo "Profile queue: ${SCU_PROFILE_QUEUE}" >> ${PROFILE_LOG}
+	echo "Next profile: ${PROFILE_NUMBER}" >> ${PROFILE_LOG}
+	echo "Iterations: ${PROFILE_QUEUE_ITERATIONS}" >> ${PROFILE_LOG}
+	echo "Timeout: ${PROFILE_QUEUE_TIMEOUT}" >> ${PROFILE_LOG}
+	echo "Pause: ${PROFILE_QUEUE_PAUSE}" >> ${PROFILE_LOG}
+	echo >> ${PROFILE_LOG}
+	if [[ -f "${PROFILE_FILE}" ]]; then
+		echo "Profile file: ${PROFILE_FILE} (exists)" >> ${PROFILE_LOG}
+	else
+		echo "Profile file: ${PROFILE_FILE} (does not exist)" >> ${PROFILE_LOG}
+	fi
+	echo >> ${PROFILE_LOG}
+	date +"%Y-%m-%d %H:%M:%S" >> ${PROFILE_LOG}
+	echo >> ${PROFILE_LOG}
+
+	cp -p "${SCU_PROFILE_QUEUE}" "${SCU_PROFILE_QUEUE}.OLD"
+
+	# Prepare queue update
+	if [[ "${PROFILE_QUEUE_ITERATIONS}" -gt 1 ]]; then
+		echo "Decrementing profile ${PROFILE_NUMBER} iterations ${PROFILE_QUEUE_ITERATIONS}"
+		PROFILE_QUEUE_ITERATIONS=${PROFILE_QUEUE_ITERATIONS}-1
+		PROFILE_ENTRY="${PROFILE_NUMBER};${PROFILE_QUEUE_ITERATIONS};${PROFILE_QUEUE_TIMEOUT};${PROFILE_QUEUE_PAUSE} #${PROFILE_QUEUE_COMMENT}"
+
+		awk -v PROFILE="${PROFILE_NUMBER}" -v NEWENTRY="${PROFILE_ENTRY}" 'BEGIN{FOUND=0} \
+			{if($0~"^[ \t]*"PROFILE";" && FOUND<1){$0=NEWENTRY; FOUND=1}; print}' \
+			"${SCU_PROFILE_QUEUE}" >"${SCU_PROFILE_QUEUE}.NEW"
+	else
+		echo "Commenting out profile ${PROFILE_NUMBER} (iterations ${PROFILE_QUEUE_ITERATIONS})"
+		awk -v PROFILE="${PROFILE_NUMBER}" 'BEGIN{FOUND=0} \
+			{if($0~"^"PROFILE && FOUND<1){$0="#"$0; FOUND=1}; print}' \
+			"${SCU_PROFILE_QUEUE}" >"${SCU_PROFILE_QUEUE}.NEW"
+	fi
+
+	if [[ $(diff "${SCU_PROFILE_QUEUE}.NEW" "${SCU_PROFILE_QUEUE}" | \
+			awk -F ";" '$1~/^< / {print substr($1, 3)}') == "#${PROFILE_NUMBER}" ]]; then
+		echo "Queue update successfully prepared"
+		# diff "${SCU_PROFILE_QUEUE}.NEW" "${SCU_PROFILE_QUEUE}" | egrep "^<|^>"
+	fi
+
+	echo "Timeout (keepalive): ${PROFILE_QUEUE_TIMEOUT}"
+	echo "Pause (wakeup):      ${PROFILE_QUEUE_PAUSE}"
+
+	# Set timeout (keepalive) to value read from queue
+	if [[ "${PROFILE_QUEUE_TIMEOUT}" != "" && "${PROFILE_QUEUE_TIMEOUT}" -gt 0 ]]; then
+		EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+			SCU_Keepalive ${PROFILE_QUEUE_TIMEOUT}"
+	else
+		EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+			SCU_Keepalive 3600" # default to 1h for this profile
+			#TODO# Keepalive=0 should be 'no timeout'!
+	fi
+	echo "Executing command: ${EXEC_CMD}"
+	${EXEC_CMD}
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	# Set pause till next profile (wakeup) to value read from queue
+	if [[ "${PROFILE_QUEUE_PAUSE}" != "" && "${PROFILE_QUEUE_PAUSE}" -gt 0 ]]; then
+		EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+			SCU_Wakeup ${PROFILE_QUEUE_PAUSE}"
+	else
+		EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send \
+			SCU_Wakeup 7200" # default to 2h for pause till next profile
+	fi
+	echo "Executing command: ${EXEC_CMD}"
+	${EXEC_CMD}
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	# Execute profile script
+	date +"%Y-%m-%d %H:%M:%S"
+
+	# Backup and modify shell PS4 prompt (for sourced profile script)
+	PS4_BEFORE="$PS4" # backup current PS4 prompt (typically "+")
+	PS4="#_Profile_${PROFILE_NUMBER}_# "
+
+	echo
+	# Backup and modify shell x option
+	SET_X_BEFORE=$(echo $- | grep "x" && echo "-x" || echo "+x")
+	set -x # Set shell option -x (trace of commands)
+
+
+	if "${SCU_DEVELOPMENT_MODE}"; then
+		# SCU development mode: skip actual execution of profile
+		touch SCU_development_mode.tmp
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"SCU development mode: Skipping execution of profile ${PROFILE_FILE}"
+	else
+		# Execute SCU science profile
+		echo "Running ${PROFILE_FILE}"
+		echo "--------------------------------------------------"
+		. "${PROFILE_FILE}" 2>&1 | tee -a ${PROFILE_LOG}
+		echo "--------------------------------------------------"
+		echo
+	fi
+
+	set ${SET_X_BEFORE} # reset shell x option to previous state {-x|+x}
+	PS4="${PS4_BEFORE}" # reset shell PS4 prompt to previous state
+
+	date +"%Y-%m-%d %H:%M:%S"
+
+	# Apply update to profile queue after processing is complete
+	cp "${SCU_PROFILE_QUEUE}.NEW" "${SCU_PROFILE_QUEUE}"
+	rm "${SCU_PROFILE_QUEUE}.NEW"
+
+	echo >> ${PROFILE_LOG}
+	date +"%Y-%m-%d %H:%M:%S" >> ${PROFILE_LOG}
+	echo >> ${PROFILE_LOG}
+
+	echo "##################################################" >> ${PROFILE_LOG}
+
+	# Post-process log file (remove "# " lines, replace "##_" with "#_")
+	PROFILE_LOG_TXT="$(basename ${PROFILE_LOG} .log).txt"
+	cat "${PROFILE_LOG}" | egrep -v "lib_MCU_serial_send|#_Profile_101_# \(\(|^[ \t]*$" | \
+		sed -e "s/^##_/#_/g" | sed -e "s/#_Profile_/\n#_Profile_/g" >"${PROFILE_LOG_TXT}"
+	mv "${PROFILE_LOG_TXT}" "${PROFILE_LOG}"
+
+else
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+		"No profile found waiting in queue, not performing any science"
+
+fi
+

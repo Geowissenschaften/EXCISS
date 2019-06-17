@@ -1,0 +1,79 @@
+###############################################################################
+#
+# ISS_messages.txt
+#
+# Messages from Goethe University Frankfurt Night of Science (NoS) 2018 to ISS.
+# Visitors of NoS entered the following messages during NoS 2018 (2018-06-08/
+# 17:00-06:00) to be transported to ISS with EXCISS.
+#
+# $LOCATION ${SCU_HOME}/etc
+#
+# $REQUIRES {none}
+#
+# $RETURNS {none}
+#
+# $COMPONENT_NAME MLU.SCU.ISS_messages.txt
+# $VERSION_NUMBER 0.6.1
+# $VERSION_DATE 2018-06-09_06:00:00
+#
+###############################################################################
+s_id,s_created,d_message,d_ds
+1,2018-06-08 05:29:18,test,0
+2,2018-06-08 05:51:15,sdfsdfsdf,0
+3,2018-06-08 07:17:43,asdfasdfasdf,0
+4,2018-06-08 07:26:11,"asdfasfd",0
+5,2018-06-08 07:28:00,"asdfasfd",0
+6,2018-06-08 07:28:41,"asdfasfd",0
+7,2018-06-08 07:29:10,Hallo Welt!,0
+8,2018-06-08 07:29:59,,0
+9,2018-06-08 07:39:19,sdfsdfs,0
+10,2018-06-08 07:39:27,asdfasdfasd,0
+11,2018-06-08 07:41:41,941,0
+12,2018-06-08 10:14:22,HackFFM is amazing!!!,0
+13,2018-06-08 11:04:09,fgjgjghj,0
+14,2018-06-08 11:32:36,"ffghhjhjg",0
+15,2018-06-08 11:41:41,Super Seite!,0
+16,2018-06-08 11:49:30,"Hallo ISS, wie ist das Wetter bei dir so? Viele Grüße, Tamara aus Frankfurt",0
+17,2018-06-08 12:05:42,Shintaro ist der intelligenteste Mensch den ich kenne. Und Jochen auch. We <3 Hackerspace.,0
+18,2018-06-08 12:06:14,MSc. Koch kann alles!!,0
+19,2018-06-08 12:06:29,Msc Koch 4 President!!,0
+20,2018-06-08 12:14:48,"Hallo Mozart, liebe Grüße aus dem All - deine Vivi",0
+21,2018-06-08 12:58:20,Praise Be To KEK! Shadilay my Kekistani brothers in space! Kek will be praising those who praise HIM. Thou shalt shitpost. SHADILAY!!!,0
+22,2018-06-08 13:21:13,Niklas grüßt Andreas in Niederursel :D,0
+23,2018-06-08 13:25:08,Hallo Astro Alex viele Grüße aus Frankfurt Night of Science ;-) -_Alban und Yohann_-,0
+24,2018-06-08 13:27:04,"Hi Ines, deine Happines erreichte sogar das Weltall :P LG Sarah",0
+25,2018-06-08 13:29:57,"Truthähne ertrinken manchmal, wenn sie bei Regen zu lange in den Himmel schauen! ;)",0
+26,2018-06-08 13:33:54,viele grüse von marisol und pilar,0
+27,2018-06-08 13:36:47,viele glück wünscht mara,0
+28,2018-06-08 13:41:17,Viel Erfolg an den ersten deutschen Komander von Arthur,0
+29,2018-06-08 13:48:11,"Hallo Allexander Gerst viel Glück im Weltall dein Patrick Bohlinger aus Riedberg.",0
+30,2018-06-08 13:53:14,"Hallo Alexander wie geht es im Weltall? Wir wünschen dir noch viel Glück beim forschen im All! von Jannik Springer und Fabian Konrad Schneider. :)",0
+31,2018-06-08 13:57:39,"Hallo B. aus F., entschuldigung dass wir deinen Mann D. aus F. der an der G. arbeitet so viel gebraucht haben. Jetzt ist das Ding hier oben und D. hat wieder mehr Zeit :)",0
+32,2018-06-08 13:58:22,"Hallo ich bin C. aus O., ich spiele in der besten Jazz Band die man je gehört hat.",0
+33,2018-06-08 14:02:55,"Liebes team auf der ISS - viel erfolg. Nico, Dion von kaka",0
+34,2018-06-08 14:14:45,Hi ich bin Nini und ich bin cool ; ),0
+35,2018-06-08 14:15:20,hello its me ,0
+36,2018-06-08 14:20:11,Grüße gehen runter an Herr Handisides und Herr Heidling : ),0
+37,2018-06-08 14:20:34,grüße an mich NINIIIIIIIIIIIII ,0
+38,2018-06-08 14:21:04,NINI IN SE HAUS ,0
+39,2018-06-08 14:21:29,hi tombo ,0
+40,2018-06-08 14:21:43,ISS,0
+41,2018-06-08 14:33:52,Hallo da oben :-) Liebe Grüße von der Erde.Eure Sofia Möller,0
+42,2018-06-08 14:36:11,Hallo ich bin Enya ich freue mich euch wieder zusehen,0
+43,2018-06-08 14:36:50,"Hallo meine Ponchita, ich möchte dir nur über der Stratospähre sagen wie lieb ich dich habe :-) Dein Poncho",0
+44,2018-06-08 14:37:23,"Hallo Tamara, du hast echt viel Arbeit in dieses Projekt gesteckt, wir hoffen, dass alles gut verläuft! Viele Grüße, Corrado",0
+45,2018-06-08 14:40:38,"Hallo ich bin Sofia Möller,ich freue mich euch bald wieder zusehen. :-) Grüße von der Erde ",0
+46,2018-06-08 14:43:17,Wie geht es euch is schönes Wetter bei uns schon :-),0
+47,2018-06-08 14:43:53,D. S. aus K. ist doof.,0
+48,2018-06-08 14:45:23,Sta ima? Kakvo je vrijeme gore? <3,0
+49,2018-06-08 14:46:43,O.C. forever my love kleineralsdrei,0
+50,2018-06-08 14:47:31,T.K. wir machen eine Alpakafarm auf P.G.,0
+51,2018-06-08 14:59:50,"Hi Tamara, das hast du toll gemacht. Gerade hast du tolle rote Haare und ich dafür Bier. Ich hab dich lieb .... wer bin ich?",0
+52,2018-06-08 15:18:12,"Liebe ISS , wir wünschen ihnen oben im All eine schöne Atmusfähre und leckeres Essen :). Ich find das All toll und wünschen viele verrückte Abeteuer dort drin!;) Viele Grüße von der Erde",0
+53,2018-06-08 15:27:42,Hallo ich wünsch gute Gesundheit und dass alles gut geht. ,0
+54,2018-06-08 15:29:06,Hi,0
+55,2018-06-08 15:37:56,"""Hello World!"" All the best from Junia and Felix. So far and thank you for the fish!",0
+56,2018-06-08 15:40:00,"Hi ISS! We are always following you from ground! Best for all of you guys up there. Warm greetings from Luciana and Alex in Frankfurt- Germany. PS: we call you ""colectivito espacial""",0
+57,2018-06-08 15:59:00,"Hello there outside in space with grettings from mother earth. Louise",0
+58,2018-06-08 16:09:53,"Hallo Alex! Bist du gut angekommen? Wie ist das Wetter da oben?",0
+59,2018-06-08 16:52:03,Was für eine Aussicht! :o,0

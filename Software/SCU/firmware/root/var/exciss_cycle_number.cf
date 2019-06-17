@@ -1,0 +1,35 @@
+###############################################################################
+#
+# exciss_increment_cycle.sh
+#
+#
+# Increment EXCISS cycle counter and reconfigure symlinks in EXCISS_HOME
+#
+# Usage: exciss_increment_cycle.sh
+#
+# Parameters:
+#   <none>
+#
+# Default location: /opt/exciss/mission/bin/exciss_increment_cycle.sh
+#
+# Requires files/binaries:
+#   $EXCISS_HOME/etc/exciss_env
+#   $EXCISS_HOME/var/exciss_cycle_number.cf
+#
+# Requires gloval variables:
+#   $EXCISS_HOME
+#
+# Returns:
+#   {true|false}
+#
+# EXCISS_CYCLE_COUNT = current number of experiment cycle (
+#
+# If not started as root user requires sudo permissions for:
+#   chown
+#
+# Invoked by: /etc/rc.local (as root)
+#
+###############################################################################
+ 	 	EXCISS_CYCLE_COUNT 	 	= 	  	99 	 	 # cycle count
+###############################################################################
+

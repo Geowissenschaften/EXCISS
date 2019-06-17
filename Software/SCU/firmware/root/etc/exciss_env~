@@ -1,0 +1,57 @@
+###############################################################################
+#
+# exciss_env
+#
+#
+# Environment file for EXCISS shell scripts
+#
+# Usage: . exciss_env
+#
+# Default location: ${EXCISS_HOME}/etc/exciss_env
+#
+# This file is sourced into shell scripts to provide environment variables.
+#
+# MUST NOT END WITH 'exit', else the calling script will be terminated!
+#
+###############################################################################
+
+EXCISS_HOME="/opt/exciss/mission" # Home directory of EXCISS environment
+
+EXCISS_UID="pi" # Linux user ID of EXCISS environment
+EXCISS_GID="pi" # Linux group ID of EXCISS environment
+
+EXCISS_LAUNCH="exciss_launch.sh" # Name of EXCISS launcher to run
+
+LOG_DATE_FORMAT="%Y%m%d_%H%M%S" # Date/time stamp format for log file
+LOG_DIR="${EXCISS_HOME}/log" # Directory where log file is located
+LOG_FILE_NAME="$(date -u +${LOG_DATE_FORMAT})_$(basename ${EXCISS_LAUNCH} .sh).log"
+LOG_FILE="${LOG_DIR}/${LOG_FILE_NAME}" # File name and absolute path of log file
+TIME_STAMP_FORMAT="%Y-%m-%d_%H:%M:%S" # Date/time stamp format for log entries
+
+# USB mount points and UUIDs / USB UUIDs can be translated with:
+# # ls -l /dev/disk/by-uuid | grep "sd"
+
+USB_A_PATH="/opt/exciss/mission/USB_A"
+USB_A_UUID="207ab9d2-6021-4de8-b565-22a15edb4965"
+USB_A_SIZE="512" # Nominal (rounded) size of USB stick [GB]
+USB_A_FILESYSTEM="ext4"
+
+USB_B_PATH="/opt/exciss/mission/USB_B"
+USB_B_UUID="1bedf96f-5f16-4955-966a-f115b4589f39"
+USB_B_SIZE="512" # Nominal (rounded) size of USB stick [GB]
+USB_B_FILESYSTEM="ext4"
+
+USB_X_PATH="/opt/exciss/mission/USB_X"
+USB_X_UUID="0000-0000"
+USB_X_SIZE="32" # Nominal (rounded) size of USB stick [GB]
+USB_X_FILESYSTEM="vfat"
+
+EXCISS_ENV_LOADED="true" #
+
+export EXCISS_HOME EXCISS_UID EXCISS_GID
+export LOG_DATE_FORMAT LOG_DIR LOG_FILE
+export USB_A_PATH USB_B_PATH USB_X_PATH
+export EXCISS_ENV_LOADED
+
+###############################################################################
+

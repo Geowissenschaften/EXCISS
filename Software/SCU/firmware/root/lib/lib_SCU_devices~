@@ -1,0 +1,316 @@
+#!/bin/bash
+#
+# lib_SCU_devices
+#
+# $VERSION_NUMBER 0.6.0
+# $VERSION_DATE 2018-08-21_23:55:00
+#
+MY_FILE_NAME="$(basename $0)" # file name of this script (without path)
+MY_BASE_NAME="$(basename ${MY_FILE_NAME} .sh)" # script name without ".sh"
+typeset -i MY_EXIT_RC=0 # return code of this script (0=success)
+
+SCU_HOME="/opt/MLU/SCU"
+. "${SCU_HOME}/etc/SCU_env"
+LIB_SERIAL_SEND_REL="lib/lib_MCU_serial_send"
+#LIB_SERIAL_READ_REL="lib/lib_MCU_serial_read"
+
+F_BIN_USB_MEMORY_REL="bin/USB_memory" # binary USB_memory
+F_LIB_MCU_MESSAGE_REL="lib/lib_MCU_message" # library lib_MCU_message
+
+if [[ "$(whoami)" != "root" ]]; then
+	CMD_PREFIX_SUDO="suxdo "
+else
+	CMD_PREFIX_SUDO=""
+fi
+
+
+function f_SCU_USB_Power_Mount {
+
+	#
+	# f_SCU_USB_Power_Mount
+	#
+	# Try to power on and mount USB device, else return to previous states
+	#
+
+	USB_POWER_STATE_BEFORE=""
+	USB_MOUNT_DIR_BEFORE=""
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Function $(basename ${FUNCNAME[0]})" \
+			"called by $(basename ${BASH_SOURCE[0]}) [${BASH_LINENO[0]}]" \
+			"with parameters $@" >&2
+	fi
+
+	USB_LABEL=$1 # {USB_A|USB_B|USB_X}
+	USB_FILE_SYSTEM="${SCU_HOME}/${USB_LABEL}"
+
+
+	if [[ "${USB_LABEL}" != "USB_A" && "${USB_LABEL}" != "USB_B" && \
+		"${USB_LABEL}" != "USB_X" ]]; then
+
+		echo "Usage: f_SCU_Mount_USB {USB_A|USB_B|USB_X}" >&2
+		MY_EXIT_RC=2
+
+	else
+
+		USB_POWER_STATE_BEFORE=$(${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} \
+			f_MCU_send ${USB_LABEL}_Power Status | awk -F "=" \
+			-v USB="${USB_LABEL}" '$1 == USB {print $2}')
+
+		if [[ "${USB_POWER_STATE_BEFORE}" == "on" ]]; then
+			USB_MOUNT_DIR_BEFORE=$(${SCU_HOME}/${F_BIN_USB_MEMORY_REL} -d | \
+				awk -F ";" -v USB="${USB_LABEL}" '$7 == USB {print $9}')
+		fi
+
+		if [[ "${USB_MOUNT_DIR_BEFORE}" == "" ]]; then
+			USB_MOUNT_DIR_BEFORE="N/A"
+		fi
+
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Powering on device ${USB_LABEL} and mounting ${USB_FILE_SYSTEM}"
+
+		if [[ "${USB_POWER_STATE_BEFORE}" == "on" ]]; then
+
+			if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+					"Device ${USB_LABEL} is already powered on" >&2
+			fi
+
+		else
+			# Power on USB memory device
+			if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+					"Powering on device ${USB_LABEL}" >&2
+			fi
+			"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -p ${USB_LABEL}
+			USB_POWER_STATE_NEW=$(${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} \
+				f_MCU_send ${USB_LABEL}_Power Status | awk -F "=" \
+				-v USB="${USB_LABEL}" '$1 == USB {print $2}')
+		fi
+
+		if [[ "${USB_POWER_STATE_BEFORE}" == "on" || \
+			"${USB_POWER_STATE_NEW}" == "on" ]]; then
+
+			# USB memory device is powered on, mount file system next
+			if [[ "${USB_MOUNT_DIR_BEFORE}" == "${USB_FILE_SYSTEM}" ]]; then
+
+				# File system is already correctly mounted as desired
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+					"${USB_LABEL} is already mounted on" \
+					"${USB_MOUNT_DIR_BEFORE}" >&2
+
+			else
+
+				if [[ "${USB_MOUNT_DIR_BEFORE}" != "N/A" ]]; then
+
+					# Try to unmount file system by mount point first
+					# A mounted file system is not usable after power cycle
+					if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+						echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+							"Unmounting ${USB_LABEL} first" >&2
+					fi
+					"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -u ${USB_LABEL}
+
+					# Try to unmount remaining file system by device name
+					# List matching devices currently mounted in reverse order
+					# awk '{a[i++]=$0} END {for (j=i-1; j>=0;) print a[j--]}' := tac
+					USB_DISK_DEV=$(mount 2>/dev/null | awk '{a[i++]=$0} END \
+						{for (j=i-1; j>=0;) print a[j--]}' | awk \
+						-v FILESYSTEM="${USB_MOUNT_DIR_BEFORE}" '$3 == FILESYSTEM \
+						{DEVLIST=DEVLIST$1" "} END {gsub("[ ]+$", "", DEVLIST); \
+						print DEVLIST}')
+
+					# Unmount file system using device name (not the mount point)
+					for USB_DEV in ${USB_DISK_DEV}; do
+						# loop name list in rare case multiple devs are mounted here
+						if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+							echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME}" \
+								"Debug Unmounting ${USB_DEV} from" \
+								"${USB_MOUNT_DIR_BEFORE}" >&2
+						fi
+						${CMD_PREFIX_SUDO}fuser -km "${USB_DEV}" >/dev/null 2>&1
+						${CMD_PREFIX_SUDO}umount "${USB_DEV}" >&2
+					done
+
+				fi
+
+				sleep 3 # wait for device to become ready
+
+				USB_MOUNT_DIR_NEW=$(${SCU_HOME}/${F_BIN_USB_MEMORY_REL} -d | \
+					awk -F ";" -v USB="${USB_LABEL}" '$7 == USB {print $9}')
+
+				if [[ "${USB_MOUNT_DIR_NEW}" == "" ]]; then
+					USB_MOUNT_DIR_NEW="N/A"
+				fi
+
+				if [[ "${USB_MOUNT_DIR_NEW}" == "N/A" ]]; then
+
+					# Clear to mount USB memory device
+					if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+						echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+							"Mounting ${USB_FILE_SYSTEM}" >&2
+					fi
+
+					"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -m ${USB_LABEL}
+
+					USB_MOUNT_DIR_NEW=$(${SCU_HOME}/${F_BIN_USB_MEMORY_REL} -d | \
+						awk -F ";" -v USB="${USB_LABEL}" '$7 == USB {print $9}')
+
+					if [[ "${USB_MOUNT_DIR_NEW}" == "" ]]; then
+						USB_MOUNT_DIR_NEW="N/A"
+					fi
+
+					if [[ "${USB_MOUNT_DIR_NEW}" == "${USB_FILE_SYSTEM}" ]]; then
+						# File system is already correctly mounted as desired
+						echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+							"Successfully powered ${USB_LABEL}" \
+							"and mounted ${USB_MOUNT_DIR_NEW}" >&2
+					else
+						echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+							"Failed to mount ${USB_LABEL}" \
+							"on ${USB_MOUNT_DIR_NEW}" >&2
+						if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+							MY_EXIT_RC=4
+						fi
+					fi
+
+				else
+
+					echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+						"Failed to unmount ${USB_MOUNT_DIR_NEW} for ${USB_LABEL}" >&2
+					if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+						MY_EXIT_RC=4
+					fi
+
+				fi
+
+			fi
+
+		else
+
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+				"Failed to power on device ${USB_LABEL}" >&2
+			if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+				MY_EXIT_RC=4
+			fi
+
+		fi
+
+		if [[ ${MY_EXIT_RC} -gt 0 ]]; then
+			# Revert to previous power/mount states if mount was unsuccessful
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+				"Reverting power/mount state of ${USB_LABEL} after failure" >&2
+
+			USB_MOUNT_DIR_NEW=$(${SCU_HOME}/${F_BIN_USB_MEMORY_REL} -d | \
+				awk -F ";" -v USB="${USB_LABEL}" '$7 == USB {print $9}')
+			if [[ "${USB_MOUNT_DIR_NEW}" != "${USB_MOUNT_DIR_BEFORE}" ]]; then
+				# Unmount currently mounted file system
+				"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -u ${USB_LABEL}
+				if [[ "${USB_MOUNT_DIR_BEFORE}" != "" && \
+					"${USB_MOUNT_DIR_BEFORE}" != "N/A" ]]; then
+					# Mount default (not any previously mounted) file system
+					"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -m ${USB_LABEL}
+				fi
+			fi
+
+			USB_MOUNT_DIR_NEW=$(${SCU_HOME}/${F_BIN_USB_MEMORY_REL} -d | \
+				awk -F ";" -v USB="${USB_LABEL}" '$7 == USB {print $9}')
+
+			if [[ "${USB_MOUNT_DIR_NEW}" != "${USB_MOUNT_DIR_BEFORE}" ]]; then
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+					"Failed to reset file system ${USB_MOUNT_DIR_BEFORE}" >&2
+			fi
+
+			USB_POWER_STATE_NEW=$(${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} \
+				f_MCU_send ${USB_LABEL}_Power Status | awk -F "=" \
+				-v USB="${USB_LABEL}" '$1 == USB {print $2}')
+			if [[ "${USB_POWER_STATE_NEW}" != "${USB_POWER_STATE_BEFORE}" ]]; then
+				if [[ "${USB_POWER_STATE_BEFORE}" == "on" ]]; then
+					"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -p ${USB_LABEL}
+				else
+					"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -q ${USB_LABEL}
+				fi
+			fi
+
+			USB_POWER_STATE_NEW=$(${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} \
+				f_MCU_send ${USB_LABEL}_Power Status | awk -F "=" \
+				-v USB="${USB_LABEL}" '$1 == USB {print $2}')
+			if [[ "${USB_POWER_STATE_NEW}" != "${USB_POWER_STATE_BEFORE}" ]]; then
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+					"Failed to reset power of ${USB_LABEL}" \
+					"to ${USB_POWER_STATE_BEFORE}" >&2
+			fi
+
+		fi
+
+	fi
+
+	return ${MY_EXIT_RC}
+}
+
+function f_SCU_USB_Unmount_Unpower {
+
+	#
+	# f_SCU_USB_Unmount_Unpower
+	#
+	# Try to unmount and power off USB device, else return to previous states
+	#
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Function $(basename ${FUNCNAME[0]})" \
+			"called by $(basename ${BASH_SOURCE[0]}) [${BASH_LINENO[0]}]" \
+			"with parameters $@" >&2
+	fi
+
+	USB_LABEL=$1 # {USB_A|USB_B|USB_X}
+	USB_FILE_SYSTEM="${SCU_HOME}/${USB_LABEL}"
+
+
+	if [[ "${USB_LABEL}" != "USB_A" && "${USB_LABEL}" != "USB_B" && \
+		"${USB_LABEL}" != "USB_X" ]]; then
+
+		echo "Usage: f_SCU_USB_Unmount_Unpower {USB_A|USB_B|USB_X}" >&2
+		MY_EXIT_RC=2
+
+	else
+
+		"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -u ${USB_LABEL}
+		"${SCU_HOME}/${F_BIN_USB_MEMORY_REL}" -q ${USB_LABEL}
+
+	fi
+
+	return ${MY_EXIT_RC}
+
+}
+
+
+#
+# Execute the function spcified as $1 with any arguments
+#
+
+#if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+#	echo "Executing library function: ${MY_BASE_NAME}.$@" >&2
+#fi
+
+if [[ "$1" == "f_SCU_USB_Power_Mount" || \
+	"$1" == "f_SCU_USB_Unmount_Unpower" ]]; then
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "Executing library function: ${MY_BASE_NAME}.$@" >&2
+	fi
+
+	$@
+	SCRIPT_EXIT_RC=$?
+else
+	echo "Usage: ${MY_FILE_NAME}" \
+		"{f_SCU_USB_Power_Mount|f_SCU_USB_Unmount_Unpower}" >&2
+fi
+
+exit ${MY_EXIT_RC}
+
+###############################################################################
+# EOF
+###############################################################################
+

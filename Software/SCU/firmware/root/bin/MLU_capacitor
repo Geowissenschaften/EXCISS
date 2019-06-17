@@ -1,0 +1,596 @@
+#!/bin/bash
+###############################################################################
+#
+# MLU_capacitor
+#
+# Charges HVU capacitors to specified voltage and reports status.
+#
+# $LOCATION ${SCU_HOME}/bin
+#
+# $REQUIRES VARIABLE SCU_HOME
+# $REQUIRES VARIABLE HVU_WAIT_CHARGED_TIMEOUT
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_SCU_base
+# $REQUIRES LIBRARY ${SCU_HOME}/lib/lib_MCU_message
+#
+# $RETURNS 0 success
+# $RETURNS 1 general error
+# $RETURNS 2 invalid option or argument
+# $RETURNS 3 failed to load environment
+# $RETURNS 4 error performing requested task
+#
+# $COMPONENT_NAME MLU.SCU.MLU_capacitor
+# $VERSION_NUMBER 0.6.1
+# $VERSION_DATE 2018-09-01_23:59:00
+#
+# $TODO OPTION_LOWER_S not implemented
+#
+###############################################################################
+# set -x
+unalias -a
+
+#------------------------------------------------------------------------------
+# Define global environment variables
+#------------------------------------------------------------------------------
+
+MY_START_TIME="$(date +%Y-%m-%d_%H:%M:%S)" # current time early after start
+MY_DIR_NAME="$(dirname $0)" # directory where this script is located
+MY_FILE_NAME="$(basename $0)" # file name of this script (without path)
+MY_BASE_NAME="$(basename ${MY_FILE_NAME} .sh)" # script name without ".sh"
+MY_EXEC_USER="$(whoami 2>/dev/null)" # name of user who started this script
+MY_PROCESS_ID="$(ps -fp $$ -o pid= | awk '{print $1}')" # PID of this script
+MY_PARENT_ID="$(ps -fp $$ -o ppid= | awk '{print $1}')" # PID of parent process
+MY_ARG_COUNT="$#" # number of parameters passed to this script
+MY_ARG_LIST="$@" # list of all parameters passed to this script
+WORK_DIR_NAME="$(pwd)" # current work directory of shell starting this script
+
+typeset -i RETURN_CODE=0 # return code of previous command (0=success)
+typeset -i MY_EXIT_RC=0 # return code of this script (0=success)
+typeset -i OPT_EXCLUSIVE_COUNT=0 # counter for mutually exclusive options
+typeset -i OPT_REQUIRED_COUNT=0 # counter for required options
+
+F_LIB_SCU_BASE_REL="lib/lib_SCU_base" # library lib_SCU_base
+F_LIB_MCU_MESSAGE_REL="lib/lib_MCU_message" # library lib_MCU_message
+
+typeset -i WAIT_CHARGED_TIMER=0 # timer waiting for 'charged' status of HVU
+typeset -i HVU_STATUS_CHECK_INTERVAL=10 # time to wait between checks [s]
+
+#------------------------------------------------------------------------------
+#
+# Function f_Print_Help
+#
+# Shows the usage of this script.
+# Usage: f_Print_Help
+# Returns: 0 success
+# StdOut: usage information
+# StdErr: (none)
+#------------------------------------------------------------------------------
+
+function f_Print_Help {
+
+	echo "Usage: ${MY_FILE_NAME} {-a|-c Voltage|-s|-w [Timeout]}" \
+		"[-v][-V][-h]"
+	echo "Charges HVU capacitors to specified voltage and reports status."
+	echo
+	echo "  -a     abort charging and dischange capacitors to 0V"
+	echo "  -c     charge capacitors to target Voltage"
+	echo "  -s     print full status report for capacitors"
+	echo "  -w     wait for status 'charged' of capacitors"
+	echo "  -v     print verbose output"
+	echo "  -V     print version of this script"
+	echo "  -h     print this help message"
+	echo
+	echo "  Voltage is the charging level of the capacitor {0..} [V]"
+	echo "  Timeout is the time to wait for the 'charged' status [s]"
+	echo
+	echo "Example: ${MY_FILE_NAME} -c 150"
+
+	return 0
+
+}
+
+#------------------------------------------------------------------------------
+#
+# Function f_Load_SCU_Env
+#
+# Loads the SCU environment with global variables and functions.
+# Usage: f_Load_SCU_Env
+# Returns: 0 success
+# Returns: 1 variable $SCU_HOME is undefined
+# Returns: 2 directory $SCU_HOME is invalid
+# Returns: 3 failed to load SCU environment
+# StdOut: (none)
+# StdErr: error/debug information
+#------------------------------------------------------------------------------
+
+function f_Load_SCU_Env {
+
+	if [[ "${SCU_HOME}" == "" ]]; then
+
+		echo "ERROR: Variable SCU_HOME not defined in environment!" >&2
+		return 1
+
+	else
+
+		if [[ ! -e "${SCU_HOME}" ]]; then
+
+			if "${OPTION_LOWER_V}"; then
+				echo "ERROR: Directory SCU_HOME=${SCU_HOME} does not exist!" >&2
+			fi
+			return 2
+
+		elif [[ ! -e "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" ]]; then
+
+			if "${OPTION_LOWER_V}"; then
+				echo "ERROR: SCU_HOME=${SCU_HOME} is not a valid SCU" \
+					"installation!" >&2
+			fi
+			return 2
+
+		else
+
+			if "${OPTION_LOWER_V}"; then
+				echo "Calling library function:" \
+					"${SCU_HOME}/${F_LIB_SCU_BASE_REL} f_SCU_Load_Env" >&2
+			fi
+
+			export SCU_HOME # export current SCU_HOME for calls to libraries
+			unset SCU_ENV_VERSION_NUMBER SCU_ENV_VERSION_DATE # clear variables
+			. "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" f_SCU_Load_Env # source SCU_env
+
+			if [[ -n "${SCU_ENV_VERSION_NUMBER}" && \
+					-n "${SCU_ENV_VERSION_DATE}" ]]; then
+
+				if "${OPTION_LOWER_V}"; then
+					echo "Successfully loaded SCU environment version:" \
+						"${SCU_ENV_VERSION_NUMBER} (${SCU_ENV_VERSION_DATE})" >&2
+					echo "Using SCU_HOME=${SCU_HOME}" >&2
+					echo >&2
+				fi
+				return 0
+
+			else
+
+				if "${OPTION_LOWER_V}"; then
+					echo "ERROR: Failed to load SCU environment in" \
+						"SCU_HOME=${SCU_HOME}!" >&2
+				fi
+				return 3
+
+			fi
+
+		fi
+
+	fi
+
+}
+
+#------------------------------------------------------------------------------
+#
+# Function f_Get_HVU_Charge_Status
+#
+# Retrieves the HVU charge status of the capacitors.
+# Usage: f_Get_HVU_Charge_Status
+# Returns: 0 success
+# Returns: 1 failed to retrieve the HVU charge status
+# StdOut: {standby|charging|charged|failed}
+# StdErr: error/debug information
+#------------------------------------------------------------------------------
+
+function f_Get_HVU_Charge_Status {
+
+	typeset -i FUNCTION_RC=0 # return code of this function (0=success)
+
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Retrieving the HVU charge status of the capacitors" >&2
+
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send"
+	EXEC_CMD="${EXEC_CMD} Capacitor_Charge"
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Executing command: ${EXEC_CMD}" >&2
+	fi
+
+	${EXEC_CMD}
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Return code: ${RETURN_CODE}" >&2
+	fi
+
+	if [[ "${RETURN_CODE}" -eq 0 ]]; then
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+				"Successfully retrieved the charge status of the capacitors" >&2
+		fi
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Failed to retrieved the HVU charge status of the capacitors" >&2
+		if [[ ${FUNCTION_RC} -eq 0 ]]; then # only report first error
+			FUNCTION_RC=1
+		fi
+	fi
+
+	return ${FUNCTION_RC}
+
+}
+
+#------------------------------------------------------------------------------
+# Parse command line parameters
+#------------------------------------------------------------------------------
+
+GETOPTS_OPTSTRING=":ac:sw:vVh" # needs to start with ':' for quiet mode
+
+OPTION_LOWER_A=false
+OPTION_LOWER_C=false
+OPTION_LOWER_S=false
+OPTION_LOWER_W=false
+OPTION_LOWER_V=false
+OPTION_UPPER_V=false
+OPTION_LOWER_H=false
+OPTION_LOWER_C_ARG=""
+OPTION_LOWER_W_ARG=""
+
+#
+# Print help (-h|-?) and version (-V) on priority
+# (will not work if given as an argument to an option requiring arguments)
+#
+
+OPTIND=1 # start with 1st command line parameter
+while getopts "${GETOPTS_OPTSTRING}" CMD_OPTION; do
+	case "${CMD_OPTION}" in
+		"v")
+			OPTION_LOWER_V=true
+			;;
+		"V")
+			OPTION_UPPER_V=true
+			;;
+		"h")
+			OPTION_LOWER_H=true
+			;;
+		"?")
+			if [[ "${OPTARG}" == "?" ]]; then
+				OPTION_LOWER_H=true
+			fi
+			;;
+	esac
+done
+
+if "${OPTION_LOWER_H}"; then
+	f_Print_Help
+	exit 0
+fi
+
+if "${OPTION_UPPER_V}"; then
+	MY_VERSION_NUMBER="$(awk '$1~/^#/ && $2~/^\$VERSION_NUMBER$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+	MY_VERSION_DATE="$(awk '$1~/^#/ && $2~/^\$VERSION_DATE$/ \
+		{print $3; exit}' ${MY_DIR_NAME}/${MY_FILE_NAME} 2>/dev/null)"
+	if [[ -n "${MY_VERSION_NUMBER}" && -n "${MY_VERSION_DATE}" ]]; then
+		echo "${MY_BASE_NAME} version ${MY_VERSION_NUMBER}" \
+			"(${MY_VERSION_DATE})"
+		exit 0
+	else
+		echo "ERROR: Can not find version information" \
+			"for ${MY_BASE_NAME}!" >&2
+		exit 1
+	fi
+fi
+
+#
+# Parse remaining command line options and arguments
+#
+
+OPTIND=1 # start with 1st command line parameter
+while getopts "${GETOPTS_OPTSTRING}" CMD_OPTION; do
+	case "${CMD_OPTION}" in
+		"a")
+			OPTION_LOWER_A=true
+			;;
+		"c")
+			OPTION_LOWER_C=true
+			OPTION_LOWER_C_ARG="${OPTARG}"
+			;;
+		"s")
+			OPTION_LOWER_S=true
+			;;
+		"w")
+			OPTION_LOWER_W=true
+			OPTION_LOWER_W_ARG="${OPTARG}"
+			;;
+		"?")
+			echo "ERROR: Invalid option -${OPTARG} specified!" >&2
+			echo >&2
+			f_Print_Help >&2
+			exit 2
+			;;
+		":")
+			if [[ "${OPTARG}" == "w" ]]; then # ignore optional arguments
+				OPTION_LOWER_W=true
+			else
+				echo "ERROR: Option -${OPTARG} requires an argument!" >&2
+				echo >&2
+				f_Print_Help >&2
+				exit 2
+			fi
+			;;
+	esac
+done
+
+#
+# Parse trailing positional parameters
+# ($OPTIND, $OPTIND+1, $OPTIND+2, ...)
+#
+
+POS_PARAM1="${@:$OPTIND:1}"
+if [[ -n "${POS_PARAM1}" ]]; then
+	# no positional parameter at all is expected
+	echo "ERROR: Parameter ${POS_PARAM1} not expected!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+#
+# Verify mutual exclusive parameters
+#
+
+"${OPTION_LOWER_A}" && OPT_EXCLUSIVE_COUNT=${OPT_EXCLUSIVE_COUNT}+1
+"${OPTION_LOWER_C}" && OPT_EXCLUSIVE_COUNT=${OPT_EXCLUSIVE_COUNT}+1
+"${OPTION_LOWER_S}" && OPT_EXCLUSIVE_COUNT=${OPT_EXCLUSIVE_COUNT}+1
+"${OPTION_LOWER_W}" && OPT_EXCLUSIVE_COUNT=${OPT_EXCLUSIVE_COUNT}+1
+if [[ ${OPT_EXCLUSIVE_COUNT} -gt 1 ]]; then
+	echo "ERROR: Options {-a|-c|-s|-w} are mutually exclusive!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+#
+# Verify required parameters are present
+#
+
+"${OPTION_LOWER_A}" && OPT_REQUIRED_COUNT=${OPT_REQUIRED_COUNT}+1
+"${OPTION_LOWER_C}" && OPT_REQUIRED_COUNT=${OPT_REQUIRED_COUNT}+1
+"${OPTION_LOWER_S}" && OPT_REQUIRED_COUNT=${OPT_REQUIRED_COUNT}+1
+"${OPTION_LOWER_W}" && OPT_REQUIRED_COUNT=${OPT_REQUIRED_COUNT}+1
+if [[ ${OPT_REQUIRED_COUNT} -le 0 ]]; then
+	echo "ERROR: Required option {-a|-c|-s|-w} missing!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+#
+# Verify dependent parameters are present and in range
+#
+
+if [[ "${OPTION_LOWER_C_ARG}" -lt 0 ]]; then
+
+	echo "ERROR: Voltage out of bounds {0..}!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+if [[ "${OPTION_LOWER_W_ARG}" -lt 0 ]]; then
+
+	echo "ERROR: Timeout out of bounds {0..}!" >&2
+	echo >&2
+	f_Print_Help >&2
+	exit 2
+fi
+
+#------------------------------------------------------------------------------
+# Load SCU environment with global variables (e.g. DEBUG_LEVEL)
+#------------------------------------------------------------------------------
+
+f_Load_SCU_Env
+RETURN_CODE=$?
+if [[ ${RETURN_CODE} -gt 0 ]]; then
+	echo "ERROR: Failed to initialize the SCU runtime environment!" >&2
+	exit 3
+fi
+
+#
+# Adjust DEBUG_LEVEL (set in SCU_env) if verbose option was specified
+#
+
+if "${OPTION_LOWER_V}"; then
+	DEBUG_LEVEL=${DEBUG_LEVEL_DETAIL}
+fi
+
+#
+# Print details of this process
+#
+
+if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+	. "${SCU_HOME}/${F_LIB_SCU_BASE_REL}" f_SCU_Process_Info >&2 # source into
+	echo >&2
+fi
+
+#------------------------------------------------------------------------------
+# Perform main program
+#------------------------------------------------------------------------------
+
+if "${OPTION_LOWER_A}"; then
+
+	#
+	# Abort charging and dischange capacitors to 0V
+	#
+	# MLU_capacitor -a
+	#
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Aborting charging and dischange capacitors to 0V"
+
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send"
+	EXEC_CMD="${EXEC_CMD} Capacitor_Abort"
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Executing command: ${EXEC_CMD}" >&2
+	fi
+
+	${EXEC_CMD} >&2
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Return code: ${RETURN_CODE}" >&2
+	fi
+
+	if [[ "${RETURN_CODE}" -eq 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Successfully requested abort of charging of capacitors" >&2
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Failed to request abort of charging of capacitors" >&2
+		if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+			MY_EXIT_RC=4
+		fi
+	fi
+
+elif "${OPTION_LOWER_C}"; then
+
+	#
+	# Charge capacitors to target Voltage
+	#
+	# MLU_capacitor -c
+	#
+
+	CAP_TARGET_VOLTAGE="${OPTION_LOWER_C_ARG}"
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Requesting charging of capacitors to ${CAP_TARGET_VOLTAGE}"
+
+	EXEC_CMD="${SCU_HOME}/${F_LIB_MCU_MESSAGE_REL} f_MCU_send"
+	EXEC_CMD="${EXEC_CMD} Capacitor_Charge ${CAP_TARGET_VOLTAGE}"
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Executing command: ${EXEC_CMD}" >&2
+	fi
+
+	${EXEC_CMD} >&2
+	RETURN_CODE=${PIPESTATUS[0]}
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+			"Return code: ${RETURN_CODE}" >&2
+	fi
+
+	if [[ "${RETURN_CODE}" -eq 0 ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Successfully requested charging of capacitors to" \
+			"${CAP_TARGET_VOLTAGE}" >&2
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Failed to request charging of capacitors to" \
+			"${CAP_TARGET_VOLTAGE}" >&2
+		if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+			MY_EXIT_RC=4
+		fi
+	fi
+
+elif "${OPTION_LOWER_S}"; then
+
+	#
+	# Print full status report for capacitors
+	#
+	# MLU_capacitor -s
+	#
+
+	echo "Option -s not implemented" >&2
+	if [[ ${MY_EXIT_RC} -eq 0 ]]; then # only report first error
+		MY_EXIT_RC=2
+	fi
+
+elif "${OPTION_LOWER_W}"; then
+
+	#
+	# Wait for status 'charged' of capacitors
+	#
+	# MLU_capacitor -w
+	#
+
+	WAIT_CHARGED_TIMEOUT="${OPTION_LOWER_W_ARG}"
+
+	# Get HVU_WAIT_CHARGED_TIMEOUT from SCU_env if not provided
+	if [[ "${OPTION_LOWER_W_ARG}" == "" ]]; then
+		WAIT_CHARGED_TIMEOUT="${HVU_WAIT_CHARGED_TIMEOUT}"
+		if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Debug" \
+				"Using default wait timeout from SCU_env" \
+				"(HVU_WAIT_CHARGED_TIMEOUT=${WAIT_CHARGED_TIMEOUT})" >&2
+		fi
+	fi
+
+	HVU_CHARGE_STATUS="unknown"
+
+	echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+		"Waiting for status 'charged' of capacitors" \
+		"(timeout: ${WAIT_CHARGED_TIMEOUT})"
+
+	while [[ "${HVU_CHARGE_STATUS}" != "charged" && \
+		"${WAIT_CHARGED_TIMER}" -lt "${WAIT_CHARGED_TIMEOUT}" ]]; do
+
+		HVU_CHARGE_STATUS_VOLTAGE="$(f_Get_HVU_Charge_Status)"
+		RETURN_CODE=${PIPESTATUS[0]}
+
+		HVU_CHARGE_VOLTAGE="$(echo ${HVU_CHARGE_STATUS_VOLTAGE} | \
+			awk '{print $2}')"
+		HVU_CHARGE_STATUS="$(echo ${HVU_CHARGE_STATUS_VOLTAGE} | \
+			awk '{print $1}')"
+
+		if [[ ${RETURN_CODE} = 0 ]]; then
+			if [[ "${HVU_CHARGE_STATUS}" == "charged" ]]; then
+				if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+					echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+						"Capacitor status 'charged' at ${HVU_CHARGE_VOLTAGE}V" \
+						"after ${WAIT_CHARGED_TIMER}s" >&2
+				fi
+				break # no need to continue with this loop
+			elif [[ "${HVU_CHARGE_STATUS}" == "charging" ]]; then
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+					"Capacitor status 'charging' at ${HVU_CHARGE_VOLTAGE}V" \
+					"after ${WAIT_CHARGED_TIMER}s," \
+					"checking again in ${HVU_STATUS_CHECK_INTERVAL}s" >&2
+			else
+				echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Warning" \
+					"Invalid capacitor status '${HVU_CHARGE_STATUS}'" \
+					"at ${HVU_CHARGE_VOLTAGE}V after ${WAIT_CHARGED_TIMER}s," \
+					"still retrying in ${HVU_STATUS_CHECK_INTERVAL}s" >&2
+			fi
+		else
+			echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+				"Failed to get capacitor status at ${HVU_CHARGE_VOLTAGE}V" \
+				"after ${WAIT_CHARGED_TIMER}s," \
+				"retrying in ${HVU_STATUS_CHECK_INTERVAL}s" >&2
+		fi
+
+		WAIT_CHARGED_TIMER=${WAIT_CHARGED_TIMER}+${HVU_STATUS_CHECK_INTERVAL}
+		sleep 10
+	done
+
+	if [[ "${HVU_CHARGE_STATUS}" == "charged" ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} Info" \
+			"Successfully charged capacitors to ${HVU_CHARGE_VOLTAGE}V" \
+			"in ${WAIT_CHARGED_TIMER}s" >&2
+	else
+		echo "$(date +${DATE_FORMAT_SHORT}) ${MY_FILE_NAME} ERROR" \
+			"Failed to charge capacitors within ${WAIT_CHARGED_TIMER}s" \
+			"(status=${HVU_CHARGE_STATUS} voltage=${HVU_CHARGE_VOLTAGE}V)" >&2
+		MY_EXIT_RC=4
+	fi
+
+fi
+
+exit ${MY_EXIT_RC}
+
+###############################################################################
+# EOF
+###############################################################################
+

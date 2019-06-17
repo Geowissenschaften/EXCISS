@@ -1,0 +1,109 @@
+#!/bin/bash
+#
+# lib_SCU_base
+#
+# Library containing SCU related sourced functions
+#
+# $REQUIRES VARIABLE SCU_HOME
+# $REQUIRES VARIABLE DEBUG_LEVEL
+# $REQUIRES FILE ${SCU_HOME}/etc/SCU_env
+# Exposes functions: ...
+# MUST NOT 'exit'!
+# f_SCU_Load_Env: Variable DEBUG_LEVEL unavailable yet!
+# Functions f_SCU_Load_Env and f_SCU_Process_Info must be sourced (".")!
+# Sourced functions must be unset in this library before return
+#
+# $VERSION_NUMBER 0.6.0
+# $VERSION_DATE 2018-08-21_23:55:00
+#
+
+SCU_HOME="/opt/MLU/SCU"
+DATE_FORMAT_SHORT="%Y%m%d_%H%M%S"
+LIB_FILE_NAME="lib_SCU_base"
+#DEBUG_LEVEL=2	# should be set from SCU_env since this lib is sourced
+#DEBUG_LEVEL_INFO=1 # should be set from SCU_env since this lib is sourced
+LIB_EXIT_RC=0
+
+F_ETC_SCU_ENV_FILE_REL="etc/SCU_env" # relative path of SCU environment file
+
+function f_SCU_Load_Env {
+
+	#
+	# f_SCU_Load_Env
+	#
+
+	if [[ ! -f "${SCU_HOME}/${F_ETC_SCU_ENV_FILE_REL}" ]]; then
+		echo "ERROR: Environment file ${SCU_HOME}/${F_ETC_SCU_ENV_FILE_REL}" \
+			"not found!" >&2
+	else
+		. "${SCU_HOME}/${F_ETC_SCU_ENV_FILE_REL}" # source in SCU_env file
+	fi
+
+	LIB_EXIT_RC=0
+
+}
+
+function f_SCU_Process_Info {
+
+	#
+	# f_SCU_Process_Info
+	#
+
+	if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+		echo "$(date +${DATE_FORMAT_SHORT}) ${LIB_FILE_NAME} Debug" \
+			"Function $(basename ${FUNCNAME[0]})" \
+			"called by $(basename ${BASH_SOURCE[0]}) [${BASH_LINENO[0]}]" \
+			"with parameters $@" >&2
+	fi
+
+	PPID_NAME_ARGS="$(ps -p ${MY_PARENT_ID} -o args= 2>/dev/null)"
+
+	echo "${MY_BASE_NAME} started as $0"
+	if [[ ${MY_ARG_COUNT} -eq 0 ]]; then
+		 echo "Arguments (0):  <none>"
+	else
+		 echo "Arguments (${MY_ARG_COUNT}):  ${MY_ARG_LIST}"
+	fi
+	echo "Work directory: ${WORK_DIR_NAME}"
+	echo "Executed by:    $(id ${MY_EXEC_USER} | awk '{print $1" "$2}')"
+	echo "Script PID:     ${MY_PROCESS_ID}"
+	echo "Script PPID:    ${MY_PARENT_ID} (${PPID_NAME_ARGS})"
+	echo "Start time:     ${MY_START_TIME}"
+
+	LIB_EXIT_RC=0
+
+}
+
+#
+# Execute the function spcified as $1 with any arguments
+#
+
+#if [[ ${DEBUG_LEVEL} -ge ${DEBUG_LEVEL_INFO} ]]; then
+#	echo "Executing library function: ${MY_BASE_NAME}.$@" >&2
+#fi
+
+if [[ "$1" == "f_SCU_Load_Env" || "$1" == "f_SCU_Process_Info" ]]; then
+	$@
+	LIB_EXIT_RC=$?
+else
+	echo "Usage: ${LIB_FILE_NAME}" \
+		"{f_SCU_Load_Env|f_SCU_Process_Info|f_SCU_USB_Power_Mount|f_SCU_USB_Unmount_Unpower}" >&2
+fi
+
+#
+# Disposition of (also sourced) variables and functions
+#
+
+unset LIB_EXIT_RC
+unset LIB_FILE_NAME
+
+unset f_SCU_Load_Env
+unset f_SCU_Process_Info
+
+return ${LIB_EXIT_RC}
+### must not "exit" !!!
+
+###############################################################################
+# EOF
+###############################################################################
+

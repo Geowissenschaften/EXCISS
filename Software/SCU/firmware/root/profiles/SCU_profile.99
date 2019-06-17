@@ -1,0 +1,64 @@
+###############################################################################
+#
+# SCU_Profile.99 *** TESTPROFIL ***
+#
+###############################################################################
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s Image_b0f0                         # take 1 still image
+
+#
+# Take one bright image
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s Image_b1f150                       # take 1 still image
+
+#
+# Start video recording for 3m in background
+#
+MLU_camera -d Video_f0b20 -t 180 &               # record 600s video with '&'
+PID=$!                                           # take note of MLU_camera PID
+
+#
+# Charge capacitors to 200V (in background via MCU)
+#
+MLU_capacitor -c 200                             # charge cpacitors to 200V
+
+#
+# Vibration 1x 5s then wait for 1s
+#
+MLU_shaker -s 5                                  # shake for 5s
+sleep 1                                          # wait for 10s
+
+#
+# Wait for full charge of capacitors and perform ignition
+#
+MLU_capacitor -w                                 # wait for full charge
+MLU_ignition -i 200                              # ignition at 200V
+
+#
+# Wait for video to finish
+#
+wait $PID                                        # wait for PID of '&' job
+
+#
+# Take one bright image
+#
+MLU_camera -s Image_b1f150                       # take 1 still image
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s Image_b0f0                         # take 1 still image
+
+MLU_LED -a 0                                     # turn off back+front LED
+
+###############################################################################
+# EOF
+###############################################################################
+

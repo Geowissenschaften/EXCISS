@@ -1,0 +1,87 @@
+###############################################################################
+#
+# SCU_Profile.500
+#
+# Science experiment profile / backup profile
+#
+# Runs a predefined "best guess" experiment with video recording and ignition
+# and low charging of the capacitors.
+# This profile runs if no communications with the payload was possible
+# and is planed as an emergency backup.
+#
+# DO NOT USE shebang (#!) IN LINE ONE OR 'exit' ANYWHERE IN THIS SCRIPT!
+#
+# $LOCATION ${SCU_HOME}/profiles
+#
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_camera
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_capacitor
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_ignition
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_LED
+# $REQUIRES FILE ${SCU_HOME}/bin/MLU_shaker
+#
+# $RETURNS {none}
+#
+# $COMPONENT_NAME MLU.SCU.SCU_Profile.500
+# $VERSION_NUMBER 0.6.0
+# $VERSION_DATE 2018-08-21_23:55:00
+#
+###############################################################################
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s Image_b0f0                         # take 1 still image
+
+#
+# Take one bright image
+#
+MLU_LED -b 1                                     # turn on back LED at 1/255
+MLU_LED -f 150                                   # turn on front LED at 150/255
+MLU_camera -s Image_b1f150                       # take 1 still image
+
+#
+# Start video recording for 10m in background
+#
+MLU_camera -d Video_f0b20 -t 600 &               # record 600s video with '&'
+PID=$!                                           # take note of MLU_camera PID
+
+#
+# Charge capacitors to 200V (in background via MCU)
+#
+MLU_capacitor -c 250                             # charge cpacitors to 200V
+
+#
+# Vibration 1x 5s then wait for 10s
+#
+MLU_shaker -s 5                                  # shake for 5s
+sleep 10                                         # wait for 10s
+
+#
+# Wait for full charge of capacitors and perform ignition
+#
+MLU_capacitor -w                                 # wait for full charge
+MLU_ignition -i 250                              # ignition at 200V
+
+#
+# Wait for video to finish
+#
+wait $PID                                        # wait for PID of '&' job
+
+#
+# Take one bright image
+#
+MLU_camera -s Image_b1f150                       # take 1 still image
+
+#
+# Take one dark image
+#
+MLU_LED -a 0                                     # turn off back+front LED
+MLU_camera -s Image_b0f0                         # take 1 still image
+
+MLU_LED -a 0                                     # turn off back+front LED
+
+###############################################################################
+# EOF
+###############################################################################
+

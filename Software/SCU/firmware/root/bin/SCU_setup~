@@ -1,0 +1,95 @@
+#!/bin/bash
+#
+# SCU_setup
+#
+# Usage: SCU_setup {-c|-f}
+#
+# $VERSION_NUMBER 0.6.0
+# $VERSION_DATE 2018-08-21_23:55:00
+#
+
+export SCU_HOME="/opt/MLU/SCU" # home directory of SCU => SCU_env
+export SCU_USER_UID="pi" # user name of SCU owner => SCU_env
+export SCU_USER_GID="pi" # group name of SCU owner => SCU_env
+
+F_LIB_MCU_SERIAL_SEND_LOG_REL="log/lib_MCU_serial_send.log" # MCU UART log
+F_SCU_BOOT_LOG_REL="log/SCU_boot.log" # SCU_boot log file
+F_CYCLE_INC_LOG_REL="log/SCU_cycle_increment.log" # cycle number log file
+
+CMD_PREFIX_SUDO="sudo "
+
+if [[ "$1" == "-c" ]]; then
+
+	# Query packages and binaries
+	dpkg-query -l ntfs-3g git git-core imagemagick lshw python-pip
+
+	# GZIP_CMD
+	ls -l /bin/gzip # binary of GNUZip needed for tgz updates
+	# RASPIVID_CMD
+	ls -l /usr/bin/raspivid # binary for recording videos
+	# RASPISTILL_CMD
+	ls -l /usr/bin/raspistill # binary for taking images
+	# OPENSSL_CMD
+	ls -l /usr/bin/openssl # binary of OpenSSL needed for MD5 hashes
+
+	# Verify NTP is disabled
+	NTP_STATE="$(timedatectl | awk '/Network time on/ {print $NF}')"
+	NTP_SYNCED="$(timedatectl | awk '/NTP synchronized/ {print $NF}')"
+	if [[ "${NTP_STATE}" != "no" || "${NTP_SYNCED}" != "no" ]]; then
+		echo "Error: NTP is not disabled, date updates will not be persistent"
+	fi
+
+	# Verify autostart of SCU
+	grep "SCU_boot" /etc/rc.local
+
+elif [[ "$1" == "-f" ]]; then
+
+	echo "Fixing directories and permissions of SCU environment in ${SCU_HOME}:"
+
+	cd ${SCU_HOME}
+	if [[ ! $(pwd) == "${SCU_HOME}" ]]; then
+		echo "ERROR: Failed to change directories to ${SCU_HOME}!"
+		exit 1
+	fi
+
+	echo "* Creating directories"
+
+	${CMD_PREFIX_SUDO} mkdir -p bin data etc lib log mnt profiles tmp update/done var
+	# ${CMD_PREFIX_SUDO} mkdir -p USB_A USB_B USB_X/TO_GROUND USB_X/TO_SPACE/updates
+	# ${CMD_PREFIX_SUDO} mkdir -p data/sent log/sent tmp/data tmp/done USB_A/sent USB_B/sent
+
+	# Create (empty) files so permissions can be changed to pi:pi
+	${CMD_PREFIX_SUDO}touch "${F_LIB_MCU_SERIAL_SEND_LOG_REL}"
+	${CMD_PREFIX_SUDO}touch "${F_SCU_BOOT_LOG_REL}"
+	${CMD_PREFIX_SUDO}touch "${F_CYCLE_INC_LOG_REL}"
+	${CMD_PREFIX_SUDO}touch "/tmp/MLU_SCU_boot.log"
+
+	echo "* Setting permissions"
+
+	${CMD_PREFIX_SUDO} find . -exec chown "${SCU_USER_UID}:${SCU_USER_GID}" \
+		{} \; 2>/dev/null
+	${CMD_PREFIX_SUDO} find . -type d -exec chmod 0775 {} \;
+	${CMD_PREFIX_SUDO} find . -type f -exec chmod 0664 {} \;
+	${CMD_PREFIX_SUDO} find bin etc lib -type f -exec chmod 0775 {} \;
+
+	${CMD_PREFIX_SUDO} chown "${SCU_USER_UID}:${SCU_USER_GID}" "/tmp/MLU_SCU_boot.log"
+	${CMD_PREFIX_SUDO} chmod 0664 "/tmp/MLU_SCU_boot.log"
+
+	echo "* Removing backup files"
+
+	${CMD_PREFIX_SUDO} find . -type f -name "*~" -exec rm {} \;
+
+	echo
+
+	${CMD_PREFIX_SUDO} find ${SCU_HOME} -type d -ls 2>/dev/null | \
+		awk '{print $3" "$5" "$6" "$NF}' | sort -k 4
+
+else
+
+	echo "Usage: sudo ${SCU_HOME}/bin/$(basename $0) -f" >&2
+	exit 2
+
+fi
+
+exit 0
+

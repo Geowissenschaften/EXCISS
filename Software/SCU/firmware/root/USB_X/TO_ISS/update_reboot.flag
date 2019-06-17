@@ -1,0 +1,7 @@
+#
+# EXCISS_HOME/updates/update_reboot.flag
+#
+# If this file exists, Raspbian will be rebooted
+# after applying updates from EXCISS_HOME/updates/
+# and after executing EXCISS_HOME/updates/update_commands.sh
+#
